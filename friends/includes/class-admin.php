@@ -595,9 +595,25 @@ class Admin {
 				'collapsed',
 			)
 		) ) {
-			update_option( 'friends_frontend_default_view', wp_unslash( $_POST['frontend_default_view'] ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+			update_user_option( get_current_user_id(), 'friends_frontend_default_view', wp_unslash( $_POST['frontend_default_view'] ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 		} else {
-			delete_option( 'friends_frontend_default_view' );
+			delete_option( get_current_user_id(), 'friends_frontend_default_view' );
+		}
+
+		foreach ( array_merge( array( '' ), get_post_format_slugs() ) as $post_type ) {
+			$name = 'friends_frontend_theme';
+			if ( $post_type ) {
+				$name = 'friends_frontend_theme_' . $post_type;
+			}
+			$theme = 'default';
+			if ( isset( $_POST[ $name ] ) && in_array( $theme, array_keys( Frontend::get_themes() ) ) ) {
+				$theme = wp_unslash( $_POST[ $name ] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+			}
+			if ( 'default' === $theme ) {
+				delete_user_option( get_current_user_id(), $name );
+			} else {
+				update_user_option( get_current_user_id(), $name, $theme );
+			}
 		}
 
 		if ( isset( $_GET['_wp_http_referer'] ) ) {
@@ -667,12 +683,17 @@ class Admin {
 		}
 
 		$post_stats = Friends::get_post_stats();
+		$post_type_themes = array();
+		foreach ( get_post_format_slugs() as $slug ) {
+			$post_type_themes[ 'frontend_theme_' . $slug ] = get_user_option( 'friends_frontend_theme_' . $slug );
+		}
 
 		Friends::template_loader()->get_template_part(
 			'admin/settings',
 			null,
 			array_merge(
 				Friends::get_post_stats(),
+				$post_type_themes,
 				array(
 					'force_enable_post_formats'  => get_option( 'friends_force_enable_post_formats' ),
 					'post_format_strings'        => get_post_format_strings(),
@@ -683,7 +704,8 @@ class Admin {
 					'retention_number'           => Friends::get_retention_number(),
 					'retention_days_enabled'     => get_option( 'friends_enable_retention_days' ),
 					'retention_number_enabled'   => get_option( 'friends_enable_retention_number' ),
-					'frontend_default_view'      => get_option( 'friends_frontend_default_view', 'expanded' ),
+					'frontend_default_view'      => get_user_option( 'friends_frontend_default_view', 'expanded' ),
+					'frontend_theme'             => get_user_option( 'friends_frontend_theme' ),
 					'blocks_everywhere'          => get_user_option( 'friends_blocks_everywhere' ),
 				)
 			)
@@ -1810,7 +1832,7 @@ class Admin {
 		$rest_url = false;
 
 		if ( ( isset( $vars['step2'] ) && isset( $vars['feeds'] ) && is_array( $vars['feeds'] ) ) || isset( $vars['step3'] ) ) {
-			$friend_user_login = str_replace( ' ', '-', sanitize_user( $vars['user_login'] ) );
+			$friend_user_login = trim( str_replace( ' ', '-', sanitize_user( $vars['user_login'] ) ), '-' );
 			$friend_display_name = sanitize_text_field( $vars['display_name'] );
 			if ( ! $friend_user_login ) {
 				// phpcs:ignore WordPress.WP.I18n.MissingArgDomain
@@ -1918,14 +1940,14 @@ class Admin {
 
 			$better_user_login = User::get_user_login_from_feeds( $feeds );
 			if ( $better_user_login ) {
-				$friend_user_login = $better_user_login;
+				$friend_user_login = trim( $better_user_login, '-' );
 			}
 
 			$better_display_name = User::get_display_name_from_feeds( $feeds );
 			if ( $better_display_name ) {
 				$friend_display_name = $better_display_name;
 				if ( ! $better_user_login ) {
-					$friend_user_login = strtolower( str_replace( ' ', '-', sanitize_user( $better_display_name ) ) );
+					$friend_user_login = trim( strtolower( str_replace( ' ', '-', sanitize_user( $better_display_name ) ) ), '-' );
 				}
 			}
 			if ( get_option( 'friends_enable_wp_friendships' ) ) {

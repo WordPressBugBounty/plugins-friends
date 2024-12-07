@@ -405,20 +405,24 @@ class Admin {
 			return new \WP_Error( 'invalid-url', __( 'You entered an invalid URL.', 'friends' ) );
 		}
 
-		$future_in_token = wp_generate_password( 128, false );
+		$friend_user = User::create( $user_login, 'pending_friend_request', $user_url, $display_name );
+		if ( is_wp_error( $friend_user ) ) {
+			return $friend_user;
+		}
+		$our_key = wp_generate_password( 128, false );
 
 		$current_user = wp_get_current_user();
 		$response     = wp_safe_remote_post(
 			$rest_url . '/friend-request',
 			array(
 				'body'        => array(
-					'version'  => 2,
+					'version'  => 3,
 					'codeword' => $codeword,
 					'name'     => $current_user->display_name,
 					'url'      => home_url(),
 					'icon_url' => get_avatar_url( $current_user->ID ),
 					'message'  => mb_substr( trim( $message ), 0, 2000 ),
-					'key'      => $future_in_token,
+					'key'      => $our_key,
 				),
 				'timeout'     => 20,
 				'redirection' => 5,
@@ -429,26 +433,20 @@ class Admin {
 		}
 
 		$json = json_decode( wp_remote_retrieve_body( $response ) );
-		if ( 200 !== wp_remote_retrieve_response_code( $response ) ) {
-			if ( $json && isset( $json->code ) && isset( $json->message ) ) {
-				// translators: %s is the message from the other server.
-				return new \WP_Error( $json->code, sprintf( __( 'The other side responded: %s', 'friends' ), $json->message ), $json->data );
-			}
+		if ( $json && isset( $json->code ) && isset( $json->message ) ) {
+			// translators: %s is the message from the other server.
+			return new \WP_Error( $json->code, sprintf( __( 'The other side responded: %s', 'friends' ), $json->message ), $json->data );
 		}
 
 		if ( ! $json || ! is_object( $json ) ) {
 			return new \WP_Error( 'unexpected-rest-response', 'Unexpected remote response: ' . substr( wp_remote_retrieve_body( $response ), 0, 30 ), $response );
 		}
 
-		$friend_user = User::create( $user_login, 'pending_friend_request', $user_url, $display_name );
-		if ( is_wp_error( $friend_user ) ) {
-			return $friend_user;
-		}
 		$friend_user->update_user_option( 'friends_rest_url', $rest_url );
+		$friend_user->update_user_option( 'friends_in_token', $our_key );
 
-		if ( isset( $json->request ) ) {
-			update_option( 'friends_request_' . sha1( $json->request ), $friend_user->ID );
-			$friend_user->update_user_option( 'friends_future_in_token_' . sha1( $json->request ), $future_in_token );
+		if ( isset( $json->key ) ) {
+			$friend_user->update_user_option( 'friends_out_token', $json->key );
 			$friend_user->set_role( 'pending_friend_request' );
 		}
 
@@ -998,7 +996,7 @@ class Admin {
 	 * @param  string   $catch_all The catch all behavior.
 	 * @param  \WP_Post $post       The post.
 	 */
-	public function render_preview_friend_rules( $rules, $catch_all, \WP_Post $post = null ) {
+	public function render_preview_friend_rules( $rules, $catch_all, ?\WP_Post $post = null ) {
 		$friend = $this->check_admin_edit_friend_rules();
 		$friend_posts = new \WP_Query();
 
@@ -1347,10 +1345,10 @@ class Admin {
 					update_user_option( get_current_user_id(), 'friends_hide_from_friends_page', $hide_from_friends_page );
 			}
 
-			if ( $friend->set_retention_number_enabled( filter_input( INPUT_POST, 'friends_enable_retention_number', FILTER_VALIDATE_BOOL ) ) && isset( $_POST['friends_retention_number'] ) ) {
+			if ( $friend->set_retention_number_enabled( boolval( filter_input( INPUT_POST, 'friends_enable_retention_number', FILTER_SANITIZE_NUMBER_INT ) ) ) && isset( $_POST['friends_retention_number'] ) ) {
 				$friend->set_retention_number( filter_input( INPUT_POST, 'friends_retention_number', FILTER_SANITIZE_NUMBER_INT ) );
 			}
-			if ( $friend->set_retention_days_enabled( filter_input( INPUT_POST, 'friends_enable_retention_days', FILTER_VALIDATE_BOOL ) ) && isset( $_POST['friends_retention_days'] ) ) {
+			if ( $friend->set_retention_days_enabled( boolval( filter_input( INPUT_POST, 'friends_enable_retention_days', FILTER_SANITIZE_NUMBER_INT ) ) ) && isset( $_POST['friends_retention_days'] ) ) {
 				$friend->set_retention_days( filter_input( INPUT_POST, 'friends_retention_days', FILTER_SANITIZE_NUMBER_INT ) );
 			}
 

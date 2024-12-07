@@ -2,10 +2,10 @@
 
 - Contributors: akirk
 - Tags: friends, rss, decentralized, social-network, own-your-data
-- Requires at least: 5.0
+- Requires PHP: 7.2
 - Tested up to: 6.7
 - License: GPL-2.0-or-later
-- Stable tag: 3.2.1
+- Stable tag: 3.2.2
 
 Your own WordPress at the center of your online activity. Follow friends and other websites and establish friendship relationships between blogs.
 
@@ -96,6 +96,12 @@ There is a cache of your friends post in form of a Custom Post Type friend_post 
 
 ## Changelog
 
+### 3.2.2
+- Move permissions checks into a dedicated permission_callback ([#408])
+- Add more checks around friendships ([#407])
+
+Hoping that this hardening will bring back the plugin to the WordPress.org directory after [this issue](https://www.wordfence.com/threat-intel/vulnerabilities/wordpress-plugins/friends/friends-321-missing-authorization) was was reported. While I am unsure it qualified to get the plugin taken down, I've done some hardening and bugfixing in the above pull requests. Unfortunately it was not reported in a way that it could be patched in time. If you have a security issue to report, please follow the instructions on https://github.com/akirk/friends/blob/main/SECURITY.md and/or report through https://github.com/akirk/friends/security.
+
 ### 3.2.1
 - OPML Import: Support OPMLs without nesting ([#403])
 
@@ -157,6 +163,8 @@ There is a cache of your friends post in form of a Custom Post Type friend_post 
 - Fix 404 on the New private post widget props @liviacarolgouvea ([#361])
 - Improve ghost.org ActivityPub compatibility ([#356])
 
+[#408]: https://github.com/akirk/friends/pull/408
+[#407]: https://github.com/akirk/friends/pull/407
 [#403]: https://github.com/akirk/friends/pull/403
 [#401]: https://github.com/akirk/friends/pull/401
 [#400]: https://github.com/akirk/friends/pull/400

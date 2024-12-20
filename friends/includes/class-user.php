@@ -96,8 +96,12 @@ class User extends \WP_User {
 			}
 		}
 
-		$friend_user = self::get_user( $user_login );
+		$friend_user = self::get_by_username( $user_login );
 		if ( $friend_user && ! is_wp_error( $friend_user ) ) {
+			if ( $friend_user instanceof Subscription ) {
+				$friend_user = Subscription::convert_to_user( $friend_user );
+			}
+
 			foreach ( $role_rank as $_role => $rank ) {
 				if ( $rank > $role_rank[ $role ] ) {
 					break;
@@ -384,7 +388,7 @@ class User extends \WP_User {
 	/**
 	 * Save multiple feeds for a user.
 	 *
-	 * @param      string $feeds  The feed URLs to subscribe to.
+	 * @param      array $feeds  The feed URLs to subscribe to.
 	 *
 	 * @return     array(\WP_Term)|\WP_error  $user The new associated user or an error object.
 	 */

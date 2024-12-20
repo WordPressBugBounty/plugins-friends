@@ -1175,6 +1175,35 @@ class Friends {
 		return $tax_query;
 	}
 
+	public function wp_query_get_post_tag_tax_query( $tax_query, $filter_by_post_tag ) {
+		if ( empty( $filter_by_post_tag ) ) {
+			return $tax_query;
+		}
+
+		if ( ! is_array( $filter_by_post_tag ) ) {
+			$filter_by_post_tag = array( $filter_by_post_tag );
+		}
+
+		if ( ! empty( $tax_query ) ) {
+			$tax_query['relation'] = 'AND';
+		}
+		$post_tag_query = array(
+			'taxonomy' => 'post_tag',
+			'field'    => 'slug',
+			'operator' => 'IN',
+			'terms'    => $filter_by_post_tag,
+		);
+
+		if ( ! empty( $tax_query ) ) {
+			$tax_query[] = $post_tag_query;
+		} else {
+			$tax_query = array( $post_tag_query );
+		}
+
+		return $tax_query;
+	}
+
+
 	/**
 	 * Plural texts for post formats.
 	 *
@@ -1385,6 +1414,8 @@ class Friends {
 	public static function uninstall_plugin() {
 		$taxonomies = array(
 			User_Feed::TAXONOMY,
+			User_Feed::POST_TAXONOMY,
+			Subscription::TAXONOMY,
 		);
 
 		$affected_users = new \WP_User_Query( array( 'role__in' => array( 'friend', 'acquaintance', 'friend_request', 'pending_friend_request', 'subscription' ) ) );

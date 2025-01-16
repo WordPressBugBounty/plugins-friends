@@ -109,6 +109,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		add_filter( 'mastodon_api_in_reply_to_id', array( $this, 'mastodon_api_in_reply_to_id' ), 25 );
 		add_filter( 'friends_cache_url_post_id', array( $this, 'check_url_to_postid' ), 10, 2 );
 
+		add_action( 'friends_post_author_meta', array( self::class, 'friends_post_author_meta' ) );
 		add_action( 'friends_comments_form', array( self::class, 'comment_form' ) );
 		add_action( 'wp_ajax_friends-preview-activitypub', array( $this, 'ajax_preview' ) );
 		add_action( 'wp_ajax_friends-delete-follower', array( $this, 'ajax_delete_follower' ) );
@@ -930,7 +931,37 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				if ( isset( $activity['object']['type'] ) && 'Person' === $activity['object']['type'] ) {
 					return $this->handle_incoming_update_person( $activity['object'], $user_feed );
 				}
-				return $this->handle_incoming_create( $activity['object'] );
+				$item = $this->handle_incoming_create( $activity['object'] );
+				if ( isset( $activity['object']['type'] ) && 'Note' === $activity['object']['type'] ) {
+					$friend_user = $user_feed->get_friend_user();
+					$post_id = Feed::url_to_postid( $item->permalink );
+					$message = sprintf(
+						// translators: %1$s is the post URL, %2$s is the linked user display name.
+						__( 'Received <a href="%1$s">post update</a> for %2$s', 'friends' ),
+						$friend_user->get_local_friends_page_url( $post_id ),
+						'<a href="' . esc_url( $friend_user->get_local_friends_page_url() ) . '">' . esc_html( $friend_user->display_name ) . '</a>'
+					);
+					$details = array();
+					if ( $post_id ) {
+						$_post = get_post( $post_id );
+						if ( ! class_exists( 'WP_Text_Diff_Renderer_inline', false ) ) {
+							require ABSPATH . WPINC . '/wp-diff.php';
+						}
+						$diff = new \Text_Diff( explode( 'PHP_EOL', wp_strip_all_tags( $item->content ) ), explode( 'PHP_EOL', wp_strip_all_tags( $_post->post_content ) ) );
+						$renderer = new \WP_Text_Diff_Renderer_inline();
+						$details['content'] = $renderer->render( $diff );
+						if ( empty( $details['content'] ) ) {
+							unset( $details['content'] );
+						}
+					}
+
+					if ( ! empty( $details ) ) {
+						$details['post_id'] = $post_id;
+						$details['activity'] = $activity;
+						Logging::log( 'post-update', $message, $details, self::SLUG, 0, $friend_user->ID );
+					}
+				}
+				return $item;
 			case 'delete':
 				return $this->handle_incoming_delete( $activity['object'] );
 			case 'announce':
@@ -1023,7 +1054,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				if ( ! isset( $attachment['type'] ) || ! isset( $attachment['mediaType'] ) ) {
 					continue;
 				}
-				if ( 'Document' !== $attachment['type'] ) {
+				if ( ! in_array( $attachment['type'], array( 'Document', 'Image' ), true ) ) {
 					continue;
 				}
 
@@ -1065,13 +1096,43 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		$friend_user = $user_feed->get_friend_user();
 		$this->log( 'Received person update for ' . $friend_user->user_login, compact( 'activity' ) );
 
-		if ( ! empty( $activity['summary'] ) ) {
-			$friend_user->description = $activity['summary'];
+		$message = sprintf(
+			// translators: %s is the user login.
+			__( 'Received person update for %s', 'friends' ),
+			'<a href="' . esc_url( $friend_user->get_local_friends_page_url() ) . '">' . esc_html( $friend_user->display_name ) . '</a>'
+		);
+
+		$details = array();
+
+		if ( ! empty( $activity['summary'] ) && $friend_user->description !== $activity['summary'] ) {
+			if ( ! class_exists( 'WP_Text_Diff_Renderer_inline', false ) ) {
+				require ABSPATH . WPINC . '/wp-diff.php';
+			}
+			$summary = wp_encode_emoji( $activity['summary'] );
+			$diff = new \Text_Diff( explode( PHP_EOL, $friend_user->description ), explode( PHP_EOL, $summary ) );
+			$renderer = new \WP_Text_Diff_Renderer_inline();
+			$details['summary'] = $renderer->render( $diff );
+			if ( empty( $details['summary'] ) ) {
+				unset( $details['summary'] );
+			} else {
+				$message .= ' ' . __( 'Updated description.', 'friends' );
+			}
+
+			$friend_user->description = $summary;
 		}
-		if ( ! empty( $activity['icon']['url'] ) ) {
+		if ( ! empty( $activity['icon']['url'] ) && $friend_user->get_avatar_url() !== $activity['icon']['url'] ) {
+			$details['old-icon'] = '<img src="' . esc_url( $friend_user->get_avatar_url() ) . '" style="max-height: 32px; max-width: 32px" />';
+			$details['new-icon'] = '<img src="' . esc_url( $activity['icon']['url'] ) . '" style="max-height: 32px; max-width: 32px" />';
 			$friend_user->update_user_icon_url( $activity['icon']['url'] );
+			$message .= ' ' . __( 'Updated icon.', 'friends' );
 		}
 		$friend_user->save();
+
+		if ( ! empty( $details ) ) {
+			$details['object'] = $activity;
+			Logging::log( 'user-update', $message, $details, self::SLUG, 0, $friend_user->ID );
+		}
+
 		return null; // No feed item to submit.
 	}
 	/**
@@ -1261,6 +1322,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			'post-format' => $user_feed->get_post_format(),
 			'active'      => $user_feed->is_active(),
 		);
+		$this->log( 'Received Move from ' . $old_url . ' to ' . $feed['url'] );
 
 		// Similar as in process_admin_edit_friend_feeds.
 		if ( $user_feed->get_url() !== $feed['url'] ) {
@@ -1296,7 +1358,19 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 					$user_feed->get_url()
 				)
 			);
+
+			$message = sprintf(
+				// translators: %s is the new URL.
+				__( '%1$s moved to a new URL: %2$s', 'friends' ),
+				'<a href="' . esc_url( $old_url ) . '">' . esc_html( $feed['title'] ) . '</a>',
+				'<a href="' . esc_url( $new_feed->get_url() ) . '">' . esc_html( $new_feed->get_title() ) . '</a>'
+			);
+
+			Logging::log( 'feed-move', $message, $activity, self::SLUG, 0, $friend->ID );
+
 			return $new_feed;
+		} else {
+			$this->log( 'Move URL didn\'t change, old: ' . $old_url . ', new: ' . $feed['url'] );
 		}
 
 		return true;
@@ -2530,6 +2604,27 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		return $comments;
 	}
 
+	public static function friends_post_author_meta( $friend_user ) {
+		$meta = get_post_meta( get_the_ID(), self::SLUG, true );
+		if ( ! isset( $meta['reblog'] ) || ! $meta['reblog'] ) {
+			return;
+		}
+
+		if ( ! isset( $meta['attributedTo']['id'] ) ) {
+			return;
+		}
+
+		Friends::template_loader()->get_template_part(
+			'frontend/parts/activitypub/follow-link',
+			null,
+			array(
+				'url'     => $meta['attributedTo']['id'],
+				'name'    => $meta['attributedTo']['name'],
+				'summary' => wp_strip_all_tags( $meta['attributedTo']['summary'] ),
+			)
+		);
+	}
+
 	public static function comment_form( $post_id ) {
 		$post = get_post( $post_id );
 		$mentions = self::extract_html_mentions( $post->post_content );
@@ -2548,7 +2643,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 		\comment_form(
 			array(
-				'title_reply'          => __( 'Send reply via ActivityPub', 'friends' ),
+				'title_reply'          => __( 'Send a Reply via ActivityPub', 'friends' ),
 				'title_reply_before'   => '<h5 id="reply-title" class="comment-reply-title">',
 				'title_reply_after'    => '</h5>',
 				'logged_in_as'         => '',

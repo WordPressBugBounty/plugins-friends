@@ -52,7 +52,12 @@ $avatar = apply_filters( 'friends_author_avatar_url', $avatar, $friend_user, get
 			</a>
 		<?php else : ?>
 			<a href="<?php echo esc_url( get_the_author_meta( 'url' ) ); ?>" class="author-avatar">
-				<img src="<?php echo esc_url( $avatar ? $avatar : get_avatar_url( get_the_author_meta( 'ID' ) ) ); ?>" width="36" height="36" class="avatar" />
+				<?php if ( $avatar !== $args['avatar'] ) : ?>
+					<img src="<?php echo esc_url( $avatar ); ?>" width="36" height="36" class="avatar" />
+					<img src="<?php echo esc_url( $args['avatar'] ); ?>" width="20" height="20" class="avatar avatar-overlay" />
+				<?php else : ?>
+					<img src="<?php echo esc_url( $args['avatar'] ); ?>" width="36" height="36" class="avatar" />
+				<?php endif; ?>
 			</a>
 		<?php endif; ?>
 	</div>
@@ -65,6 +70,7 @@ $avatar = apply_filters( 'friends_author_avatar_url', $avatar, $friend_user, get
 						– <?php echo esc_html( $override_author_name ); ?>
 					<?php endif; ?>
 				</a>
+				<?php do_action( 'friends_post_author_meta', $friend_user ); ?>
 			<?php else : ?>
 				<a href="<?php echo esc_url( get_author_posts_url( get_the_author_meta( 'ID' ) ) ); ?>">
 					<strong><?php the_author(); ?></strong>
@@ -104,14 +110,7 @@ $avatar = apply_filters( 'friends_author_avatar_url', $avatar, $friend_user, get
 		?>
 		</div>
 	</div>
-	<div class="teaser col-ml-auto">
-		<?php echo wp_kses( str_replace( '/p>', '/p> ', preg_replace( '#<span class="invisible">.*?</span>#', '', get_the_content() ) ), array( 'a' => array( 'href' => array() ) ) ); ?>
-	</div>
 	<div class="overflow col-ml-auto">
-		<a class="btn btn-link collapse-post" tabindex="0" title="<?php esc_html_e( 'Double or meta/shift/cmd click to toggle all', 'friends' ); ?>">
-			<i class="dashicons dashicons-fullscreen-exit-alt"></i>
-		</a>
-
 		<div class="friends-dropdown friends-dropdown-right">
 			<a class="btn btn-link friends-dropdown-toggle" tabindex="0">
 				<i class="dashicons dashicons-menu-alt2"></i>
@@ -130,3 +129,6 @@ $avatar = apply_filters( 'friends_author_avatar_url', $avatar, $friend_user, get
 
 	</div>
 </header>
+<div class="teaser col-ml-auto">
+	<?php echo wp_kses( str_replace( '/p>', '/p> ', preg_replace( '#<span class="invisible">.*?</span>#', '', get_the_content() ) ), array( 'a' => array( 'href' => array() ) ) ); ?>
+</div>

@@ -163,6 +163,10 @@ class Admin {
 			add_submenu_page( 'friends', __( 'Refresh', 'friends' ), __( 'Refresh', 'friends' ), $required_role, 'friends-refresh', array( $this, 'admin_refresh_friend_posts' ) );
 		}
 
+		if ( isset( $_GET['details'] ) && isset( $_GET['_wpnonce'] ) && wp_verify_nonce( sanitize_key( $_GET['_wpnonce'] ), 'friends-plugin-overview' ) ) {
+			add_action( 'load-' . $page_type . '_page_friends-plugins', array( 'Friends\Plugin_Installer', 'plugin_details' ) );
+		}
+
 		// phpcs:ignore WordPress.WP.I18n.MissingArgDomain
 		add_submenu_page( 'friends', __( 'Plugins' ), __( 'Plugins' ), $required_role, 'friends-plugins', array( $this, 'admin_plugin_installer' ) );
 
@@ -576,11 +580,6 @@ class Admin {
 				}
 			}
 
-			if ( isset( $_POST['limit_homepage_post_format'] ) && in_array( $_POST['limit_homepage_post_format'], get_post_format_slugs() ) ) {
-				update_option( 'friends_limit_homepage_post_format', $_POST['limit_homepage_post_format'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
-			} else {
-				delete_option( 'friends_limit_homepage_post_format' );
-			}
 			if ( isset( $_POST['blocks_everywhere'] ) && boolval( $_POST['blocks_everywhere'] ) ) {
 				update_user_option( get_current_user_id(), 'friends_blocks_everywhere', 1 );
 			} else {
@@ -612,6 +611,12 @@ class Admin {
 		update_option( 'friends_enable_retention_days', $retention_days_enabled );
 		if ( $retention_days_enabled && isset( $_POST['friends_retention_days'] ) ) {
 			update_option( 'friends_retention_days', max( 1, intval( $_POST['friends_retention_days'] ) ) );
+		}
+
+		if ( isset( $_POST['retention_delete_reacted'] ) && 1 === intval( $_POST['retention_delete_reacted'] ) ) {
+			delete_option( 'friends_retention_delete_reacted' );
+		} else {
+			update_option( 'friends_retention_delete_reacted', true );
 		}
 
 		if ( isset( $_POST['frontend_default_view'] ) && in_array(
@@ -727,6 +732,7 @@ class Admin {
 					'retention_number'           => Friends::get_retention_number(),
 					'retention_days_enabled'     => get_option( 'friends_enable_retention_days' ),
 					'retention_number_enabled'   => get_option( 'friends_enable_retention_number' ),
+					'retention_delete_reacted'   => get_option( 'friends_retention_delete_reacted' ),
 					'frontend_default_view'      => get_user_option( 'friends_frontend_default_view', get_current_user_id() ),
 					'frontend_theme'             => get_user_option( 'friends_frontend_theme' ),
 					'blocks_everywhere'          => get_user_option( 'friends_blocks_everywhere' ),

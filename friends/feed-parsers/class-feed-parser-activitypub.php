@@ -953,7 +953,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 						if ( ! class_exists( 'WP_Text_Diff_Renderer_inline', false ) ) {
 							require ABSPATH . WPINC . '/wp-diff.php';
 						}
-						$diff = new \Text_Diff( explode( 'PHP_EOL', wp_strip_all_tags( $item->content ) ), explode( 'PHP_EOL', wp_strip_all_tags( $_post->post_content ) ) );
+						$diff = new \Text_Diff( explode( 'PHP_EOL', wp_strip_all_tags( $_post->post_content ) ), explode( 'PHP_EOL', wp_strip_all_tags( $item->content ) ) );
 						$renderer = new \WP_Text_Diff_Renderer_inline();
 						$details['content'] = $renderer->render( $diff );
 						if ( empty( $details['content'] ) ) {
@@ -1067,7 +1067,12 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				if ( strpos( $attachment['mediaType'], 'image/' ) === 0 ) {
 					$data['content'] .= PHP_EOL;
 					$data['content'] .= '<!-- wp:image -->';
-					$data['content'] .= '<p><img src="' . esc_url( $attachment['url'] ) . '" width="' . esc_attr( $attachment['width'] ) . '"  height="' . esc_attr( $attachment['height'] ) . '" class="size-full" /></p>';
+					$data['content'] .= '<p><img src="' . esc_url( $attachment['url'] ) . '"';
+					if ( isset( $attachment['width'] ) && $attachment['height'] ) {
+						$data['content'] .= ' width="' . esc_attr( $attachment['width'] ) . '"';
+						$data['content'] .= ' height="' . esc_attr( $attachment['height'] ) . '"';
+					}
+					$data['content'] .= ' class="size-full" /></p>';
 					$data['content'] .= '<!-- /wp:image -->';
 				} elseif ( strpos( $attachment['mediaType'], 'video/' ) === 0 ) {
 					$data['content'] .= PHP_EOL;
@@ -1665,6 +1670,10 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 
 		$post_id = $this->cache_url( $url );
+		if ( is_wp_error( $post_id ) ) {
+			// show_message_on_frontend was called inside cache_url.
+			return;
+		}
 
 		if ( ! $post_id ) {
 			$this->show_message_on_frontend(
@@ -1676,7 +1685,6 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			);
 			return;
 		}
-		$post_id = $this->cache_url( $url );
 
 		$user = User::get_post_author( get_post( $post_id ) );
 		wp_safe_redirect( $user->get_local_friends_page_url( $post_id ) . $append_to_redirect );
@@ -1728,29 +1736,6 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	}
 
 	public function the_content( $the_content ) {
-		$protected_tags = array();
-		foreach ( array(
-			'#<a.*?href=[^>]+>.*?</a>#i', // leave the inside of links alone.
-			'#<script[^>]*>.*?</script>#i', // leave the inside of scripts alone.
-			'#<style[^>]*>.*?</script>#i', // leave the inside of styles alone.
-			'#<[^>]+>#i', // leave the inside of any tags alone.
-		) as $regex ) {
-			$the_content = preg_replace_callback(
-				$regex,
-				function ( $m ) use ( &$protected_tags ) {
-					$c = count( $protected_tags );
-					$protect = '!#!#PROTECT' . $c . '#!#!';
-					$protected_tags[ $protect ] = $m[0];
-					return $protect;
-				},
-				$the_content
-			);
-		}
-
-		$the_content = \preg_replace_callback( '/@(?:[a-zA-Z0-9_-]+)/', array( $this, 'replace_with_links' ), $the_content );
-
-		$the_content = str_replace( array_keys( $protected_tags ), array_values( $protected_tags ), $the_content );
-
 		// replace all links in <a href="mention hashtag"> with /friends/tag/tagname using the WP_HTML_Tag_Processor.
 		$processor = new \WP_HTML_Tag_Processor( $the_content );
 		while ( $processor->next_tag( array( 'tag_name' => 'a' ) ) ) {
@@ -1773,35 +1758,6 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		$the_content = $processor->get_updated_html();
 
 		return $the_content;
-	}
-
-	/**
-	 * Replace the mention with a link to the user.
-	 *
-	 * @param array $result The matched username.
-	 *
-	 * @return string The replaced username.
-	 */
-	public function replace_with_links( array $result ) {
-		$users = self::get_possible_mentions();
-		if ( ! isset( $users[ $result[0] ] ) ) {
-			return $result[0];
-		}
-
-		$metadata = $this->get_metadata( $users[ $result[0] ] );
-		if ( is_wp_error( $metadata ) || empty( $metadata['url'] ) ) {
-			return $result[0];
-		}
-
-		$username = ltrim( $users[ $result[0] ], '@' );
-		if ( ! empty( $metadata['name'] ) ) {
-			$username = $metadata['name'];
-		}
-		if ( ! empty( $metadata['preferredUsername'] ) ) {
-			$username = $metadata['preferredUsername'];
-		}
-		$username = '@<span>' . $username . '</span>';
-		return \sprintf( '<a rel="mention" class="u-url mention" href="%s">%s</a>', $metadata['url'], $username );
 	}
 
 	public function activitypub_save_settings( User $friend ) {
@@ -2624,6 +2580,14 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 		if ( ! isset( $meta['attributedTo']['id'] ) ) {
 			return;
+		}
+
+		if ( empty( $meta['attributedTo']['summary'] ) ) {
+			$meta['attributedTo']['summary'] = '';
+		}
+
+		if ( empty( $meta['attributedTo']['name'] ) ) {
+			$meta['attributedTo']['name'] = '';
 		}
 
 		Friends::template_loader()->get_template_part(

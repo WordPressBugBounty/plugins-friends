@@ -3444,7 +3444,7 @@ class Admin {
 
 		if ( $friend_post_count ) {
 			// translators: %s is the number of friend posts.
-			$items[] = '<a class="friend-posts" href="' . home_url( '/friends/' ) . '">' . sprintf( _n( '%s Post by Friends', '%s Posts by Friends', $friend_post_count, 'friends' ), $friend_post_count ) . '</a>';
+			$items[] = '<a class="friend-posts" href="' . home_url( '/friends/' ) . '">' . sprintf( _n( '%s Post by Friends', '%s Posts by Friends', $friend_post_count, 'friends' ), number_format_i18n( $friend_post_count ) ) . '</a>';
 		}
 		return $items;
 	}
@@ -3463,7 +3463,7 @@ class Admin {
 			if ( ! is_array( $widget ) ) {
 				continue;
 			}
-			$title = 'Latest Posts';
+			$title = __( 'Latest Posts', 'friends' );
 			if ( isset( $widget['format'] ) ) {
 				$title = get_post_format_string( sanitize_key( $widget['format'] ) );
 			}

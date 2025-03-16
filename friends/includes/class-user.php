@@ -97,7 +97,7 @@ class User extends \WP_User {
 		}
 
 		$friend_user = self::get_by_username( $user_login );
-		if ( $friend_user && ! is_wp_error( $friend_user ) ) {
+		if ( $friend_user && ! is_wp_error( $friend_user ) && ! $subscription_override ) {
 			if ( $friend_user instanceof Subscription ) {
 				$friend_user = Subscription::convert_to_user( $friend_user );
 			}
@@ -318,9 +318,8 @@ class User extends \WP_User {
 	 * @return User|false The friend user or false.
 	 */
 	public static function get_user_by_id( $user_id ) {
-		if ( 0 === strpos( $user_id, 'friends-virtual-user-' ) ) {
-			$term_id = substr( $user_id, strlen( 'friends-virtual-user-' ) );
-			$term = get_term( intval( $term_id ), Subscription::TAXONOMY );
+		if ( $user_id > 1e10 ) {
+			$term = get_term( $user_id - 1e10, Subscription::TAXONOMY );
 			if ( $term && ! is_wp_error( $term ) ) {
 				return new Subscription( $term );
 			}
@@ -349,18 +348,7 @@ class User extends \WP_User {
 
 		return parent::__get( $key );
 	}
-	/**
-	 * Sends a message to the friend..
-	 *
-	 * @param      string $message  The message.
-	 * @param      string $subject  The subject.
-	 *
-	 * @return     \WP_Error|bool  True if the message was sent successfully.
-	 */
-	public function send_message( $message, $subject = null ) {
-		$friends = Friends::get_instance();
-		return $friends->messages->send_message( $this, $message, $subject );
-	}
+
 
 	public function insert_post( array $postarr, $wp_error = false, $fire_after_hooks = true ) {
 		$current_user = wp_get_current_user();
@@ -551,79 +539,34 @@ class User extends \WP_User {
 	}
 
 	/**
-	 * Maybe delete an outdated post.
-	 *
-	 * @param \WP_Post $post The post.
-	 * @return int|false The post ID if it was deleted, false otherwise.
-	 */
-	private function maybe_delete_outdated_post( \WP_Post $post ) {
-		if ( ! get_option( 'friends_retention_delete_reacted' ) ) {
-			// get all terms for a post, no matter whetehr it's registered or not.
-			$term_query = new \WP_Term_Query(
-				array(
-					'object_ids' => $post->ID,
-				)
-			);
-			$reactions = array();
-			foreach ( $term_query->get_terms() as $term ) {
-				if ( substr( $term->taxonomy, 0, 16 ) !== 'friend-reaction-' ) {
-					continue;
-				}
-				$reactions[ $term->slug ] = true;
-
-			}
-			if ( $reactions ) {
-				if ( apply_filters( 'friends_debug', false ) && ! wp_doing_cron() ) {
-					echo 'Skipping ', esc_html( $post->ID ), ' because it has reactions (';
-					foreach ( array_keys( $reactions ) as $emoji ) {
-						echo esc_html( Reactions::validate_emoji( $emoji ) ), ' ';
-					}
-					echo ')<br/>', PHP_EOL;
-
-				}
-				return false;
-			}
-		}
-		if ( apply_filters( 'friends_debug', false ) && ! wp_doing_cron() ) {
-			echo 'Deleting ', esc_html( $post->ID ), '<br/>', PHP_EOL;
-		}
-		wp_delete_post( $post->ID, true );
-		return $post->ID;
-	}
-
-	/**
 	 * Delete posts the user decided to automatically delete.
 	 */
 	public function delete_outdated_posts() {
 		$deleted_posts = array();
 
 		$args = array(
-			'post_type' => Friends::CPT,
+			'post_type'      => Friends::CPT,
+			'post_status'    => array( 'publish', 'trash' ),
+			'fields'         => 'ids',
+			'posts_per_page' => 10,
 		);
 
 		if ( $this->is_retention_days_enabled() ) {
 			$args['date_query'] = array(
 				'before' => gmdate( 'Y-m-d H:i:s', strtotime( '-' . ( $this->get_retention_days() * 24 ) . 'hours' ) ),
 			);
-		} elseif ( get_option( 'friends_enable_retention_days' ) ) {
-			$args['date_query'] = array(
-				'before' => gmdate( 'Y-m-d H:i:s', strtotime( '-' . ( Friends::get_retention_days() * 24 ) . 'hours' ) ),
-			);
-		}
 
-		if ( isset( $args['date_query'] ) ) {
 			$query = new \WP_Query();
 			foreach ( $args as $key => $value ) {
 				$query->set( $key, $value );
 			}
 			$query = $this->modify_query_by_author( $query );
 
-			foreach ( $query->get_posts() as $post ) {
-				if ( apply_filters( 'friends_debug', false ) && ! wp_doing_cron() ) {
-					echo 'Deleting ', esc_html( $post->ID ), '<br/>';
+			foreach ( $query->get_posts() as $post_id ) {
+				$post_id = Friends::maybe_delete_outdated_post( $post_id, 'date overflow' );
+				if ( $post_id ) {
+					$deleted_posts[] = $post_id;
 				}
-				wp_delete_post( $post->ID, true );
-				$deleted_posts[] = $post->ID;
 			}
 		}
 
@@ -637,48 +580,11 @@ class User extends \WP_User {
 				$query->set( $key, $value );
 			}
 			$query = $this->modify_query_by_author( $query );
-
-			foreach ( $query->get_posts() as $_post ) {
-				$post_id = $this->maybe_delete_outdated_post( $_post );
+			foreach ( $query->get_posts() as $post_id ) {
+				$post_id = Friends::maybe_delete_outdated_post( $post_id, 'local number overflow' );
 				if ( $post_id ) {
 					$deleted_posts[] = $post_id;
 				}
-			}
-		}
-
-		// Global setting.
-		if ( get_option( 'friends_enable_retention_number' ) ) {
-			$args['offset'] = Friends::get_retention_number();
-			$query = new \WP_Query();
-			foreach ( $args as $key => $value ) {
-				$query->set( $key, $value );
-			}
-
-			foreach ( $query->get_posts() as $_post ) {
-				$post_id = $this->maybe_delete_outdated_post( $_post );
-				if ( $post_id ) {
-					$deleted_posts[] = $post_id;
-				}
-			}
-		}
-
-		// In any case, don't overflow the trash.
-		$args = array(
-			'post_type'   => Friends::CPT,
-			'post_status' => 'trash',
-			'offset'      => 30,
-		);
-
-		$query = new \WP_Query();
-		foreach ( $args as $key => $value ) {
-			$query->set( $key, $value );
-		}
-		$query = $this->modify_query_by_author( $query );
-
-		foreach ( $query->get_posts() as $_post ) {
-			$post_id = $this->maybe_delete_outdated_post( $_post );
-			if ( $post_id ) {
-				$deleted_posts[] = $post_id;
 			}
 		}
 
@@ -1456,6 +1362,21 @@ class User extends \WP_User {
 		return $account;
 	}
 
+	public static function mastodon_api_account_id( $user_id, $post_id ) {
+		if ( $user_id ) {
+			return $user_id;
+		}
+		$user = Feed_Parser_ActivityPub::determine_mastodon_api_user( $user_id );
+		if ( ! $user ) {
+			$user = self::get_post_author( get_post( $post_id ) );
+		}
+		if ( $user instanceof self ) {
+			return $user->ID;
+		}
+
+		return $user_id;
+	}
+
 	public static function mastodon_api_get_posts_query_args( $args ) {
 		if ( isset( $args['author'] ) && is_string( $args['author'] ) ) {
 			$author = self::get_by_username( $args['author'] );
@@ -1472,9 +1393,6 @@ class User extends \WP_User {
 		if ( ! class_exists( 'Friends\Feed_Parser_ActivityPub' ) ) {
 			if ( ! is_wp_error( $user_id ) ) {
 				$user = User::get_user_by_id( $user_id );
-				if ( ! $user ) {
-					$user = User::get_user_by_id( 'friends-virtual-user-' . $user_id );
-				}
 			}
 		} else {
 			$user = Feed_Parser_ActivityPub::determine_mastodon_api_user( $user_id );

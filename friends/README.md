@@ -5,7 +5,7 @@
 - Requires PHP: 7.2
 - Tested up to: 6.7
 - License: GPL-2.0-or-later
-- Stable tag: 3.4.0
+- Stable tag: 3.4.1
 
 Your own WordPress at the center of your online activity. Follow friends and other websites and establish friendship relationships between blogs.
 
@@ -96,16 +96,20 @@ There is a cache of your friends post in form of a Custom Post Type friend_post 
 
 ## Changelog
 
+### 3.4.1
+- DMs: Preview lastest message ([#493])
+- Fix broken DMs when using the blog user in Activitypub ([#492])
+
 ### 3.4.0
-- Fix old posts not being deleted for ActivityPub (#476)
-- Implement DMs for ActivityPub and EMA (#489)
-- Improve Frontend margins (#490)
-- Replace string ids for subscriptions with high ints (#483)
-- Fix redirect after converting user (#484)
-- Fix replying to posts with a different permalink (#478)
-- EMA: Implement following endpoint data (#480)
-- EMA: Remove old filters (#482)
-- Extension: Allow moz-extension as a URL protocol (#477)
+- Fix old posts not being deleted for ActivityPub ([#476])
+- Implement DMs for ActivityPub and EMA ([#489])
+- Improve Frontend margins ([#490])
+- Replace string ids for subscriptions with high ints ([#483])
+- Fix redirect after converting user ([#484])
+- Fix replying to posts with a different permalink ([#478])
+- EMA: Implement following endpoint data ([#480])
+- EMA: Remove old filters ([#482])
+- Extension: Allow moz-extension as a URL protocol ([#477])
 
 ### 3.3.5
 - Use Outbox of the upcoming ActivityPub 5.3.0 and fix announce+like bug with Activitypub 5.2.0 ([#463])
@@ -327,3 +331,6 @@ Hoping that this hardening will bring back the plugin to the WordPress.org direc
 [#484]: https://github.com/akirk/friends/pull/484
 [#489]: https://github.com/akirk/friends/pull/489
 [#490]: https://github.com/akirk/friends/pull/490
+
+[#492]: https://github.com/akirk/friends/pull/492
+[#493]: https://github.com/akirk/friends/pull/493

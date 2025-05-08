@@ -59,8 +59,10 @@ class Messages {
 		add_filter( 'notify_friend_message_received', array( $this, 'save_incoming_message' ), 5, 6 );
 		add_filter( 'mastodon_api_conversation', array( $this, 'mastodon_api_conversation' ), 10, 2 );
 		add_filter( 'mastodon_api_conversations', array( $this, 'mastodon_api_conversations' ), 10, 3 );
-		add_filter( 'api_status_context_post_types', array( $this, 'api_status_context_post_types' ), 10, 2 );
-		add_filter( 'api_status_context_post_statuses', array( $this, 'api_status_context_post_statuses' ), 10, 2 );
+		add_filter( 'mastodon_api_status_context_post_types', array( $this, 'api_status_context_post_types' ), 10, 2 );
+		add_filter( 'mastodon_api_status_context_post_statuses', array( $this, 'api_status_context_post_statuses' ), 10, 2 );
+		add_filter( 'api_status_context_post_types', array( $this, 'api_status_context_post_types' ), 10, 2 ); // legacy filter.
+		add_filter( 'api_status_context_post_statuses', array( $this, 'api_status_context_post_statuses' ), 10, 2 ); // legacy filter.
 		add_filter( 'mastodon_api_submit_status', array( $this, 'mastodon_api_submit_status' ), 9, 6 );
 		add_filter( 'mastodon_api_conversation_mark_read', array( $this, 'mastodon_api_conversation_mark_read' ), 10 );
 		add_filter( 'mastodon_api_conversation_delete', array( $this, 'delete_conversation' ), 10 );
@@ -810,12 +812,27 @@ class Messages {
 			$status_text,
 			null
 		);
+
+		/**
+		 * Documented in Enable_Mastodon_Apps\Handler\Status\prepare_post_data()
+		 */
+		$status_text = apply_filters( 'mastodon_api_submit_status_text', $status_text, $in_reply_to_id, $visibility );
+
 		$friend_user = false;
 		foreach ( $mentions as $mention ) {
 			$user_feed = User_Feed::get_by_url( $mention );
 			if ( $user_feed ) {
 				$friend_user = $user_feed->get_friend_user();
 				break;
+			}
+			if ( class_exists( Feed_Parser_ActivityPub::class ) ) {
+				$user_feed = User_Feed::get_by_url( $mention );
+				$url = Feed_Parser_ActivityPub::friends_webfinger_resolve( $mention, $mention );
+				$user_feed = User_Feed::get_by_url( $url );
+				if ( $user_feed ) {
+					$friend_user = $user_feed->get_friend_user();
+					break;
+				}
 			}
 		}
 

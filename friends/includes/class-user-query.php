@@ -109,7 +109,7 @@ class User_Query extends \WP_User_Query {
 	}
 
 	public function add_virtual_subscriptions( $args = array() ) {
-		if ( isset( $args['meta_key'] ) && substr( $args['meta_key'], -9 ) === '_starred' ) {
+		if ( isset( $args['meta_key'] ) && substr( $args['meta_key'], -8 ) === '_starred' ) {
 			$args['meta_key'] = 'starred'; // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
 		}
 		$searches = array();
@@ -268,7 +268,7 @@ class User_Query extends \WP_User_Query {
 		if ( ! self::$cache || ! isset( $all_friend_requests[ get_current_blog_id() ] ) ) {
 			$all_friend_requests[ get_current_blog_id() ] = new self(
 				array(
-					'role'    => 'friend_request',
+					'role'    => 'friexnd_request',
 					'order'   => 'ASC',
 					'orderby' => 'display_name',
 				)

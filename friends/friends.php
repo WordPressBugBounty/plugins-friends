@@ -3,10 +3,10 @@
  * Plugin name: Friends
  * Plugin author: Alex Kirk
  * Plugin URI: https://github.com/akirk/friends
- * Version: 3.5.1
- * Requires PHP: 5.6
+ * Version: 3.5.2
+ * Requires PHP: 7.2
 
- * Description: A social network between WordPresses. Privacy focused, by itself a self-hosted RSS++ reader with notifications.
+ * Description: Follow others via RSS and ActivityPub and read their posts on your own WordPress.
  *
  * License: GPL2
  * Text Domain: friends
@@ -25,7 +25,7 @@ defined( 'ABSPATH' ) || exit;
 define( 'FRIENDS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'FRIENDS_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
 define( 'FRIENDS_PLUGIN_FILE', plugin_dir_path( __FILE__ ) . '/' . basename( __FILE__ ) );
-define( 'FRIENDS_VERSION', '3.5.1' );
+define( 'FRIENDS_VERSION', '3.5.2' );
 
 require_once __DIR__ . '/libs/Mf2/Parser.php';
 

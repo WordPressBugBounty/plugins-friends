@@ -74,6 +74,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		\add_filter( 'activitypub_extract_mentions', array( $this, 'activitypub_extract_mentions' ), 10, 2 );
 		\add_filter( 'activitypub_extract_mentions', array( $this, 'activitypub_extract_in_reply_to_mentions' ), 10, 3 );
 		\add_filter( 'mastodon_api_external_mentions_user', array( $this, 'get_external_user' ) );
+		\add_filter( 'activitypub_rest_following', array( $this, 'activitypub_rest_following' ), 10, 2 );
 
 		\add_action( 'friends_user_post_reaction', array( $this, 'post_reaction' ) );
 		\add_action( 'friends_user_post_undo_reaction', array( $this, 'undo_post_reaction' ) );
@@ -117,6 +118,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		add_action( 'wp_ajax_friends-delete-follower', array( $this, 'ajax_delete_follower' ) );
 
 		add_action( 'mastodon_api_account_following', array( $this, 'mastodon_api_account_following' ), 10, 2 );
+		add_action( 'mastodon_api_account', array( $this, 'mastodon_api_account' ), 9, 2 );
 		add_action( 'friends_message_form_accounts', array( $this, 'friends_message_form_accounts' ), 10, 2 );
 		add_action( 'friends_send_direct_message', array( $this, 'friends_send_direct_message' ), 20, 6 );
 	}
@@ -370,6 +372,27 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 
 		return $following;
+	}
+
+	/**
+	 * Add following count to the user data.
+	 *
+	 * @param Account $user_data The user data.
+	 * @param string  $user_id   The user id.
+	 *
+	 * @return Account The filtered Account.
+	 */
+	public static function mastodon_api_account( $user_data, $user_id ) {
+		if ( get_current_user_id() !== $user_id ) {
+			return $user_data;
+		}
+		if ( ! method_exists( '\Friends\User_Feed', 'get_by_parser' ) ) {
+			return $user_data;
+		}
+
+		$user_data->following_count = count( User_Feed::get_by_parser( self::SLUG ) );
+
+		return $user_data;
 	}
 
 	public function friends_message_form_accounts( $accounts, User $friend_user ) {
@@ -1751,6 +1774,27 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		return $mentions;
 	}
 
+	/**
+	 * Add the follows for the main user.
+	 *
+	 * @param array                   $follow_list The array of following urls.
+	 * @param \Activitypub\Model\User $user        The user object.
+	 *
+	 * @return array The array of following urls.
+	 */
+	public function activitypub_rest_following( $follow_list, $user ) {
+		if ( Friends::get_main_friend_user_id() === $user->get__id() ) {
+			foreach ( User_Feed::get_by_parser( self::SLUG ) as $user_feed ) {
+				$follow_list[] = array(
+					'id'   => $user_feed->get_url(),
+					'name' => $user_feed->get_title(),
+				);
+			}
+		}
+
+		return $follow_list;
+	}
+
 	private function show_message_on_frontend( $message, $error = null ) {
 		if ( is_wp_error( $error ) ) {
 			$error = $error->get_error_message();
@@ -1862,6 +1906,10 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	}
 
 	public function the_content( $the_content ) {
+		if ( ! Friends::on_frontend() ) {
+			return $the_content;
+		}
+
 		// replace all links in <a href="mention hashtag"> with /friends/tag/tagname using the WP_HTML_Tag_Processor.
 		$processor = new \WP_HTML_Tag_Processor( $the_content );
 		while ( $processor->next_tag( array( 'tag_name' => 'a' ) ) ) {

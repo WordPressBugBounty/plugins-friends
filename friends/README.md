@@ -5,9 +5,9 @@
 - Requires PHP: 7.2
 - Tested up to: 6.8
 - License: GPL-2.0-or-later
-- Stable tag: 3.5.1
+- Stable tag: 3.5.2
 
-Your own WordPress at the center of your online activity. Follow friends and other websites and establish friendship relationships between blogs.
+Follow others via RSS and ActivityPub and read their posts on your own WordPress.
 
 [![Active Installs](https://img.shields.io/wordpress/plugin/installs/friends?logo=wordpress&logoColor=%23fff&label=Active%20Installs&labelColor=%2323282dA&color=%2323282dA)](https://wordpress.org/plugins/friends/) [![Playground Demo Link](https://img.shields.io/wordpress/plugin/v/friends?logo=wordpress&logoColor=%23fff&label=Playground%20Demo&labelColor=%233858e9&color=%233858e9)](https://playground.wordpress.net/?networking=yes&blueprint-url=https://raw.githubusercontent.com/akirk/friends/refs/heads/main/assets/blueprints/blueprint.json) [![Configured Playground Demo Link](https://img.shields.io/wordpress/plugin/v/friends?logo=wordpress&logoColor=%23fff&label=Configured%20Playground%20Demo&labelColor=%23089809&color=%23089809)](https://playground.wordpress.net/?networking=yes&blueprint-url=https://raw.githubusercontent.com/akirk/friends/refs/heads/main/assets/blueprints/blueprint-prefilled.json)
 
@@ -95,6 +95,17 @@ There is a cache of your friends post in form of a Custom Post Type friend_post 
 9. A Friend Request is accepted in the users screen. Delete the user to reject it or accept the request to make them a friend
 
 ## Changelog
+
+### 3.5.2
+- Expose following list via ActivityPub ([#538])
+- Convert query vars serialization to json ([#537])
+- Don't replace tags outside of the friends page ([#536])
+- Use EMA account data for a local user ([#535])
+- EMA: Fix following number for own user ([#534])
+- Remove external hover links ([#533])
+- Plugin Check Fixes ([#532])
+- Ajaxify Post Count display on the main friends page ([#531])
+- Always apply replace rules and fix html entity replacing ([#530])
 
 ### 3.5.1
 - Fix undefined user_id variable ([#525])
@@ -403,3 +414,13 @@ Hoping that this hardening will bring back the plugin to the WordPress.org direc
 
 [#524]: https://github.com/akirk/friends/pull/524
 [#525]: https://github.com/akirk/friends/pull/525
+
+[#530]: https://github.com/akirk/friends/pull/530
+[#531]: https://github.com/akirk/friends/pull/531
+[#532]: https://github.com/akirk/friends/pull/532
+[#533]: https://github.com/akirk/friends/pull/533
+[#534]: https://github.com/akirk/friends/pull/534
+[#535]: https://github.com/akirk/friends/pull/535
+[#536]: https://github.com/akirk/friends/pull/536
+[#537]: https://github.com/akirk/friends/pull/537
+[#538]: https://github.com/akirk/friends/pull/538

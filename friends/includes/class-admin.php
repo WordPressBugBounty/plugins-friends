@@ -354,8 +354,15 @@ class Admin {
 		add_filter(
 			'friends_friend_private_feed_url',
 			function ( $feed_url, $friend_user ) {
-				// translators: %1s is the name of the friend, %2$s is the feed URL.
-				printf( __( 'Refreshing %1$s at %2$s', 'friends' ) . '<br/>', '<a href="' . esc_url( $friend_user->get_local_friends_page_url() ) . '">' . esc_html( $friend_user->user_login ) . '</a>', '<a href="' . esc_url( $feed_url ) . '">' . esc_html( $feed_url ) . '</a>' );
+				echo wp_kses(
+					// translators: %1s is the name of the friend, %2$s is the feed URL.
+					sprintf( __( 'Refreshing %1$s at %2$s', 'friends' ) . '<br/>', '<a href="' . esc_url( $friend_user->get_local_friends_page_url() ) . '">' . esc_html( $friend_user->user_login ) . '</a>', '<a href="' . esc_url( $feed_url ) . '">' . esc_html( $feed_url ) . '</a>' ),
+					array(
+						'a' => array(
+							'href' => array(),
+						),
+					)
+				);
 				return $feed_url;
 			},
 			10,
@@ -492,6 +499,19 @@ class Admin {
 	 * @return string|bool The edit link or false.
 	 */
 	public static function admin_edit_user_link( $link, $user ) {
+		static $cache = array();
+		if ( $user instanceof \WP_User ) {
+			$cache_key = $user->ID;
+		} else {
+			$cache_key = $user;
+		}
+
+		if ( isset( $cache[ $cache_key ] ) ) {
+			if ( false === $cache[ $cache_key ] ) {
+				return $link;
+			}
+			return $cache[ $cache_key ];
+		}
 		if ( ! $user instanceof \WP_User ) {
 			if ( is_string( $user ) ) {
 				$user = User::get_by_username( $user );
@@ -501,13 +521,16 @@ class Admin {
 		}
 
 		if ( is_multisite() && is_super_admin( $user->ID ) ) {
+			$cache[ $cache_key ] = false;
 			return $link;
 		}
 		if ( ! $user->has_cap( 'friends_plugin' ) ) {
+			$cache[ $cache_key ] = false;
 			return $link;
 		}
 
-		return self_admin_url( 'admin.php?page=edit-friend&user=' . $user->user_login );
+		$cache[ $cache_key ] = self_admin_url( 'admin.php?page=edit-friend&user=' . $user->user_login );
+		return $cache[ $cache_key ];
 	}
 
 	public static function get_edit_friend_link( $user ) {
@@ -2157,22 +2180,24 @@ class Admin {
 						$title = wp_strip_all_tags( $item->content );
 					}
 					?>
-					<li><a href="<?php echo esc_url( $item->permalink ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( $item->date ); ?></a> (author: <?php echo esc_html( $item->author ); ?>, type: <?php echo esc_html( $item->post_format ); ?>):
+					<li>
 						<?php if ( $title ) : ?>
-							<a href="<?php echo esc_url( $item->permalink ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( $title ); ?></a> <?php echo esc_html( str_word_count( wp_strip_all_tags( $item->content ) ) ); ?> words
-							<?php else : ?>
-								<p>
-									<?php
-									echo wp_kses(
-										wp_trim_excerpt( $item->content ),
-										array(
-											'a'   => array( 'href' => array() ),
-											'img' => array( 'src' => array() ),
-										)
-									);
-									?>
-								</p>
-							<?php endif; ?>
+							<details><summary>
+						<?php endif; ?>
+							<a href="<?php echo esc_url( $item->permalink ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( $item->date ); ?></a> (author: <?php echo esc_html( $item->author ); ?>, type: <?php echo esc_html( $item->post_format ); ?>):
+						<?php if ( $title ) : ?>
+							<a href="<?php echo esc_url( $item->permalink ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( $title ); ?></a> <?php echo esc_html( str_word_count( wp_strip_all_tags( $item->content ) ) ); ?> words</summary>
+						<?php else : ?>
+							<p>
+						<?php endif; ?>
+							<?php
+								echo esc_textarea( $item->content );
+							?>
+						<?php if ( $title ) : ?>
+							</details>
+						<?php else : ?>
+							</p>
+						<?php endif; ?>
 						</li>
 						<?php
 				}

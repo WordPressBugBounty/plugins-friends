@@ -50,6 +50,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		\add_action( 'activitypub_inbox_move', array( $this, 'handle_received_move' ), 15, 2 );
 		\add_action( 'activitypub_inbox_update', array( $this, 'handle_received_update' ), 15, 2 );
 		\add_action( 'activitypub_handled_create', array( $this, 'activitypub_handled_create' ), 10, 4 );
+		\add_action( 'activitypub_interactions_follow_url', array( $this, 'activitypub_interactions_follow_url' ), 10, 2 );
 
 		\add_action( 'friends_user_feed_activated', array( $this, 'queue_follow_user' ), 10 );
 		\add_action( 'friends_user_feed_deactivated', array( $this, 'queue_unfollow_user' ), 10 );
@@ -622,6 +623,10 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 		$feed_details['type'] = 'application/activity+json';
 		$feed_details['autoselect'] = true;
+		$actor = $this->get_activitypub_actor( get_current_user_id() );
+		if ( $actor ) {
+			$feed_details['additional-info'] = 'You will follow as <tt>' . $actor->get_webfinger() . '</tt>';
+		}
 
 		$feed_details['suggested-username'] = str_replace( ' ', '-', sanitize_user( $meta['name'] ) );
 
@@ -812,7 +817,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	}
 
 	public function get_activitypub_actor_id( $user_id ) {
-		if ( null !== $user_id && \Activitypub\is_user_disabled( $user_id ) ) {
+		if ( null !== $user_id && ! \Activitypub\user_can_activitypub( $user_id ) ) {
 			$user_id = null;
 		}
 		if ( null === $user_id ) {
@@ -1130,7 +1135,13 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	private function handle_incoming_create( $activity ) {
 		$permalink = $activity['id'];
 		if ( isset( $activity['url'] ) ) {
-			$permalink = $activity['url'];
+			if ( is_array( $activity['url'] ) ) {
+				if ( empty( $activity['attachment'] ) ) {
+					$activity['attachment'] = $activity['url'];
+				}
+			} elseif ( is_string( $activity['url'] ) ) {
+				$permalink = $activity['url'];
+			}
 		}
 
 		$data = array(
@@ -1183,15 +1194,90 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 
 		if ( ! empty( $activity['attachment'] ) ) {
+			$attachments = array();
 			foreach ( $activity['attachment'] as $attachment ) {
 				if ( ! isset( $attachment['type'] ) || ! isset( $attachment['mediaType'] ) ) {
 					continue;
 				}
-				if ( ! in_array( $attachment['type'], array( 'Document', 'Image' ), true ) ) {
+				if ( ! in_array( $attachment['type'], array( 'Document', 'Image', 'Link' ), true ) ) {
 					continue;
 				}
 
-				if ( strpos( $attachment['mediaType'], 'image/' ) === 0 ) {
+				if ( empty( $attachment['url'] ) ) {
+					if ( ! empty( $attachment['href'] ) ) {
+						$attachment['url'] = $attachment['href'];
+					}
+				}
+				if ( 'application/x-mpegURL' === $attachment['mediaType'] ) {
+					if ( ! empty( $attachment['tag'] ) ) {
+						$videos = array();
+						foreach ( $attachment['tag'] as $tag ) {
+							if ( strpos( $tag['mediaType'], 'video/' ) === false ) {
+								continue;
+							}
+							if ( empty( $tag['rel'] ) ) {
+								$videos[ $tag['height'] ] = $tag;
+							}
+						}
+
+						if ( ! empty( $videos ) ) {
+							if ( isset( $videos[720] ) ) {
+								$video = $videos[720];
+							} elseif ( isset( $videos[480] ) ) {
+								$video = $videos[480];
+							} elseif ( isset( $videos[360] ) ) {
+								$video = $videos[360];
+							} else {
+								$video = reset( $videos );
+							}
+
+							$data['content'] .= PHP_EOL;
+							$data['content'] .= '<!-- wp:video -->';
+							$data['content'] .= '<figure class="wp-block-video"><video controls="controls"';
+							if ( isset( $video['width'] ) && $video['height'] ) {
+								$data['content'] .= ' width="' . esc_attr( $video['width'] ) . '"';
+								$data['content'] .= ' height="' . esc_attr( $video['height'] ) . '"';
+							}
+							if ( isset( $activity['icon'] ) && ! empty( $activity['icon'] ) ) {
+								if ( is_array( $activity['icon'] ) ) {
+									$poster = null;
+									// choose the larger icon.
+									foreach ( $activity['icon'] as $icon ) {
+										if ( isset( $icon['width'] ) && isset( $icon['height'] ) && isset( $icon['url'] ) && ( ! $poster || ( $icon['width'] > $poster['width'] && $icon['height'] > $poster['height'] ) ) ) {
+											$poster = $icon;
+										}
+									}
+								} else {
+									$poster = $activity['icon'];
+								}
+								if ( $poster ) {
+									$data['content'] .= ' poster="' . esc_url( $poster['url'] ) . '"';
+								}
+							}
+							$data['content'] .= ' src="' . esc_url( $video['href'] ) . '" type="' . esc_attr( $video['mediaType'] ) . '"';
+							if ( isset( $activity['duration'] ) ) {
+								$data['content'] .= ' duration="' . esc_attr( $activity['duration'] ) . '"';
+							}
+							$data['content'] .= '/>';
+							if ( ! empty( $activity['subtitleLanguage'] ) ) {
+								foreach ( $activity['subtitleLanguage'] as $subtitle ) {
+									$type = '';
+									if ( '.vtt' === substr( $subtitle['url'], -4 ) ) {
+										$type = 'text/vtt';
+									}
+									$data['content'] .= '<track src="' . esc_url( $subtitle['url'] ) . '" kind="subtitles" srclang="' . esc_attr( $subtitle['identifier'] ) . '" type="' . esc_attr( $type ) . '" label="' . esc_attr( $subtitle['name'] ) . '" />';
+								}
+							}
+							$data['content'] .= '</video>';
+							if ( ! empty( $attachment['name'] ) ) {
+								$data['content'] .= '<figcaption class="wp-element-caption">' . esc_html( $attachment['name'] ) . '</figcaption>';
+							}
+							$data['content'] .= '</figure>';
+							$data['content'] .= '<!-- /wp:video -->';
+
+						}
+					}
+				} elseif ( strpos( $attachment['mediaType'], 'image/' ) === 0 ) {
 					$data['content'] .= PHP_EOL;
 					$data['content'] .= '<!-- wp:image -->';
 					$data['content'] .= '<p><img src="' . esc_url( $attachment['url'] ) . '"';
@@ -1204,7 +1290,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				} elseif ( strpos( $attachment['mediaType'], 'video/' ) === 0 ) {
 					$data['content'] .= PHP_EOL;
 					$data['content'] .= '<!-- wp:video -->';
-					$data['content'] .= '<figure class="wp-block-video"><video controls src="' . esc_url( $attachment['url'] ) . '" />';
+					$data['content'] .= '<figure class="wp-block-video"><video src="' . esc_url( $attachment['url'] ) . '" type="' . esc_attr( $attachment['mediaType'] ) . '">';
 					if ( ! empty( $attachment['name'] ) ) {
 						$data['content'] .= '<figcaption class="wp-element-caption">' . esc_html( $attachment['name'] ) . '</figcaption>';
 					}
@@ -1793,6 +1879,13 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 
 		return $follow_list;
+	}
+
+	public function activitypub_interactions_follow_url( $redirect_uri, $uri ) {
+		if ( ! $redirect_uri ) {
+			$redirect_uri = add_query_arg( 'url', $uri, self_admin_url( 'admin.php?page=add-friend' ) );
+		}
+		return $redirect_uri;
 	}
 
 	private function show_message_on_frontend( $message, $error = null ) {

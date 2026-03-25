@@ -1,11 +1,12 @@
 <?php
 /**
  * Plugin name: Friends
- * Plugin author: Alex Kirk
  * Plugin URI: https://github.com/akirk/friends
- * Version: 3.6.0
- * Requires PHP: 7.2
-
+ * Version: 4.0.0
+ * Author: Alex Kirk
+ * Author URI: https://alex.kirk.at/
+ * Requires PHP: 7.4
+ *
  * Description: Follow others via RSS and ActivityPub and read their posts on your own WordPress.
  *
  * License: GPL2
@@ -25,13 +26,14 @@ defined( 'ABSPATH' ) || exit;
 define( 'FRIENDS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'FRIENDS_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
 define( 'FRIENDS_PLUGIN_FILE', plugin_dir_path( __FILE__ ) . '/' . basename( __FILE__ ) );
-define( 'FRIENDS_VERSION', '3.6.0' );
+define( 'FRIENDS_VERSION', '4.0.0' );
 
 require_once __DIR__ . '/libs/Mf2/Parser.php';
 
 require_once __DIR__ . '/includes/class-user.php';
 require_once __DIR__ . '/includes/class-user-feed.php';
 require_once __DIR__ . '/includes/class-user-query.php';
+require_once __DIR__ . '/includes/class-user-query-result.php';
 require_once __DIR__ . '/includes/class-subscription.php';
 
 // Classes to be implemented or used by parser plugins.
@@ -39,22 +41,23 @@ require_once __DIR__ . '/feed-parsers/class-feed-parser.php';
 require_once __DIR__ . '/feed-parsers/class-feed-parser-v2.php';
 require_once __DIR__ . '/feed-parsers/class-feed-item.php';
 
-require_once __DIR__ . '/includes/class-access-control.php';
 require_once __DIR__ . '/includes/class-admin.php';
-require_once __DIR__ . '/includes/class-automatic-status.php';
 require_once __DIR__ . '/includes/class-blocks.php';
 require_once __DIR__ . '/includes/class-feed.php';
 require_once __DIR__ . '/includes/class-frontend.php';
 require_once __DIR__ . '/includes/class-import.php';
 require_once __DIR__ . '/includes/class-logging.php';
 require_once __DIR__ . '/includes/class-messages.php';
+require_once __DIR__ . '/includes/class-migration.php';
 require_once __DIR__ . '/includes/class-notifications.php';
 require_once __DIR__ . '/includes/class-plugin-installer.php';
 require_once __DIR__ . '/includes/class-reactions.php';
 require_once __DIR__ . '/includes/class-rest.php';
+require_once __DIR__ . '/includes/class-site-health.php';
 require_once __DIR__ . '/includes/class-shortcodes.php';
 require_once __DIR__ . '/includes/class-template-loader.php';
 require_once __DIR__ . '/includes/class-third-parties.php';
+require_once __DIR__ . '/includes/class-friend-tag.php';
 require_once __DIR__ . '/includes/class-friends.php';
 
 add_action( 'plugins_loaded', array( __NAMESPACE__ . '\Friends', 'init' ) );
@@ -76,6 +79,9 @@ add_action( 'wp_initialize_site', array( __NAMESPACE__ . '\Friends', 'activate_f
 add_filter( 'customize_loaded_components', array( __NAMESPACE__ . '\Frontend', 'ensure_widget_editing' ) );
 
 require_once __DIR__ . '/widgets/class-widget-base-friends-list.php';
+require_once __DIR__ . '/widgets/class-widget-add-subscription.php';
+add_action( 'widgets_init', array( __NAMESPACE__ . '\Widget_Add_Subscription', 'register' ) );
+
 require_once __DIR__ . '/widgets/class-widget-refresh.php';
 add_action( 'widgets_init', array( __NAMESPACE__ . '\Widget_Refresh', 'register' ) );
 
@@ -88,14 +94,8 @@ add_action( 'widgets_init', array( __NAMESPACE__ . '\Widget_Starred_Friends_List
 require_once __DIR__ . '/widgets/class-widget-recent-friends-list.php';
 add_action( 'widgets_init', array( __NAMESPACE__ . '\Widget_Recent_Friends_List', 'register' ) );
 
-require_once __DIR__ . '/widgets/class-widget-friend-request.php';
-add_action( 'widgets_init', array( __NAMESPACE__ . '\Widget_Friend_Request', 'register' ) );
-
 require_once __DIR__ . '/widgets/class-widget-friend-stats.php';
 add_action( 'widgets_init', array( __NAMESPACE__ . '\Widget_Friend_Stats', 'register' ) );
-
-require_once __DIR__ . '/widgets/class-widget-new-private-post.php';
-add_action( 'widgets_init', array( __NAMESPACE__ . '\Widget_New_Private_Post', 'register' ) );
 
 require_once __DIR__ . '/widgets/class-widget-post-formats.php';
 add_action( 'widgets_init', array( __NAMESPACE__ . '\Widget_Post_Formats', 'register' ) );

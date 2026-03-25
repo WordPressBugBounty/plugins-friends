@@ -56,9 +56,6 @@ class Feed {
 	 * Register the WordPress hooks
 	 */
 	private function register_hooks() {
-		add_filter( 'pre_get_posts', array( $this, 'private_feed_query' ), 1 );
-		add_filter( 'private_title_format', array( $this, 'private_title_format' ) );
-		add_filter( 'pre_option_rss_use_excerpt', array( $this, 'feed_use_excerpt' ), 90 );
 		add_filter( 'friends_early_modify_feed_item', array( $this, 'apply_early_feed_rules' ), 10, 3 );
 		add_filter( 'friends_modify_feed_item', array( $this, 'apply_feed_rules' ), 10, 3 );
 
@@ -224,7 +221,7 @@ class Feed {
 			return $error;
 		}
 		try {
-			$items = $this->parsers[ $parser ]->fetch_feed( $user_feed->get_private_url(), $user_feed );
+			$items = $this->parsers[ $parser ]->fetch_feed( $user_feed->get_url(), $user_feed );
 		} catch ( \Exception $e ) {
 			$items = new \WP_Error( $parser . '-failed', $e->getMessage() );
 		}
@@ -607,10 +604,10 @@ class Feed {
 			}
 
 			$post_id = null;
-			if ( isset( $remote_post_ids[ $item->post_id ] ) ) {
+			if ( $item->post_id && isset( $remote_post_ids[ $item->post_id ] ) ) {
 				$post_id = $remote_post_ids[ $item->post_id ];
 			}
-			if ( is_null( $post_id ) && isset( $remote_post_ids[ $item->permalink ] ) ) {
+			if ( is_null( $post_id ) && $item->permalink && isset( $remote_post_ids[ $item->permalink ] ) ) {
 				$post_id = $remote_post_ids[ $item->permalink ];
 			}
 
@@ -734,7 +731,13 @@ class Feed {
 				update_post_meta( $post_id, 'remote_post_id', $item->{'post-id'} );
 			}
 
-			wp_set_object_terms( $post_id, $user_feed->get_id(), User_Feed::POST_TAXONOMY );
+			if ( ! get_option( 'friends_disable_auto_tagging' ) && isset( $item->friend_tags ) && ! empty( $item->friend_tags ) && is_array( $item->friend_tags ) ) {
+				Friend_Tag::add_tags( $post_id, $item->friend_tags );
+			}
+
+			if ( isset( $item->friend_mention_tags ) && ! empty( $item->friend_mention_tags ) && is_array( $item->friend_mention_tags ) ) {
+				Friend_Tag::add_tags( $post_id, $item->friend_mention_tags );
+			}
 
 			update_post_meta( $post_id, 'parser', $user_feed->get_parser() );
 			update_post_meta( $post_id, 'feed_url', $user_feed->get_url() );
@@ -762,33 +765,6 @@ class Feed {
 	}
 
 	/**
-	 * Remove the Private: when sending a private feed.
-	 *
-	 * @param  string $title_format The title format for a private post title.
-	 * @return string The modified title format for a private post title.
-	 */
-	public function private_title_format( $title_format ) {
-		if ( $this->friends->access_control->feed_is_authenticated() ) {
-			return '%s';
-		}
-		return $title_format;
-	}
-
-	/**
-	 * Disable excerpted feeds for friend feeds
-	 *
-	 * @param  boolean $feed_use_excerpt Whether to only have excerpts in feeds.
-	 * @return boolean The modified flag whether to have excerpts in feeds.
-	 */
-	public function feed_use_excerpt( $feed_use_excerpt ) {
-		if ( $this->friends->access_control->feed_is_authenticated() ) {
-			return 0;
-		}
-
-		return $feed_use_excerpt;
-	}
-
-	/**
 	 * Output an additional XMLNS for the feed.
 	 */
 	public function additional_feed_namespaces() {
@@ -805,15 +781,6 @@ class Feed {
 			$post_format = 'standard';
 		}
 		echo '<friends:post-format>' . esc_html( $post_format ) . '</friends:post-format>' . PHP_EOL;
-
-		$authenticated_user_id = $this->friends->access_control->feed_is_authenticated();
-		if ( ! $authenticated_user_id ) {
-			return;
-		}
-
-		echo '<friends:gravatar>' . esc_html( get_avatar_url( $post->post_author ) ) . '</friends:gravatar>' . PHP_EOL;
-		echo '<friends:post-status>' . esc_html( $post->post_status ) . '</friends:post-status>' . PHP_EOL;
-		echo '<friends:post-id>' . esc_html( $post->ID ) . '</friends:post-id>' . PHP_EOL;
 	}
 
 	/**
@@ -1172,25 +1139,6 @@ class Feed {
 	}
 
 	/**
-	 * Modify the main query for the friends feed
-	 *
-	 * @param  \WP_Query $query The main query.
-	 * @return \WP_Query The modified main query.
-	 */
-	public function private_feed_query( \WP_Query $query ) {
-		if ( ! $this->friends->access_control->feed_is_authenticated() ) {
-			return $query;
-		}
-
-		$friend_user = $this->friends->access_control->get_authenticated_feed_user();
-		if ( ! $query->is_admin && $query->is_feed && $friend_user->has_cap( 'friend' ) && ! $friend_user->has_cap( 'acquaintance' ) ) {
-			$query->set( 'post_status', array( 'publish', 'private' ) );
-		}
-
-		return $query;
-	}
-
-	/**
 	 * More generic version of the native url_to_postid()
 	 *
 	 * @param string $url       Permalink to check.
@@ -1314,5 +1262,40 @@ class Feed {
 			$parsers[ $slug ] = $name;
 		}
 		return $parsers;
+	}
+
+	/**
+	 * Get a parser instance by slug.
+	 *
+	 * @param string $slug The parser slug.
+	 * @return Feed_Parser|null The parser instance or null.
+	 */
+	public function get_parser_by_slug( $slug ) {
+		return isset( $this->parsers[ $slug ] ) ? $this->parsers[ $slug ] : null;
+	}
+
+	/**
+	 * Get the badge for a feed based on its parser.
+	 *
+	 * @param User_Feed $user_feed The user feed.
+	 * @return array|null Badge info array or null.
+	 */
+	public function get_feed_badge( $user_feed ) {
+		$parser_slug = $user_feed->get_parser();
+		$parser = $this->get_parser_by_slug( $parser_slug );
+
+		$badge = null;
+		if ( $parser && method_exists( $parser, 'get_badge' ) ) {
+			$badge = $parser->get_badge();
+		}
+
+		/**
+		 * Filter the badge displayed for a feed.
+		 *
+		 * @param array|null $badge     The badge array with 'label', 'color', 'title' keys, or null.
+		 * @param User_Feed  $user_feed The user feed.
+		 * @param string     $parser    The parser slug.
+		 */
+		return apply_filters( 'friends_feed_badge', $badge, $user_feed, $parser_slug );
 	}
 }

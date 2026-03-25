@@ -12,21 +12,6 @@ do_action( 'friends_settings_before_form' );
 	<?php wp_nonce_field( 'friends-settings' ); ?>
 	<table class="form-table">
 		<tbody>
-			<?php if ( current_user_can( 'manage_options' ) ) : ?>
-			<tr>
-				<th scope="row"><?php /* phpcs:ignore WordPress.WP.I18n.MissingArgDomain */ esc_html_e( 'Friendships' ); ?></th>
-				<td>
-					<fieldset>
-						<label for="enable_wp_friendships">
-							<input name="enable_wp_friendships" type="checkbox" id="enable_wp_friendships" value="1" <?php checked( '1', $args['enable_wp_friendships'] ); ?> />
-							<span><?php esc_html_e( 'Enable friendships between WordPresses.', 'friends' ); ?></span>
-						</label>
-					</fieldset>
-				</td>
-			</tr>
-					<?php
-			endif;
-			?>
 			<tr>
 				<th><?php esc_html_e( 'Retention', 'friends' ); ?></th>
 				<td>
@@ -201,6 +186,26 @@ do_action( 'friends_settings_before_form' );
 				</td>
 			</tr>
 			<tr>
+				<th scope="row"><?php esc_html_e( 'Auto-Tagging', 'friends' ); ?></th>
+				<td>
+					<fieldset>
+						<label for="disable_auto_tagging">
+							<input name="disable_auto_tagging" type="checkbox" id="disable_auto_tagging" value="1" <?php checked( '1', $args['disable_auto_tagging'] ); ?> />
+							<span><?php esc_html_e( 'Disable automatic tagging of incoming posts with hashtags.', 'friends' ); ?></span>
+						</label>
+						<p class="description">
+						<?php
+						esc_html_e( 'When incoming friend posts are tagged based on contained hashtags, you can filter by tag.', 'friends' );
+						echo ' ';
+						esc_html_e( 'These tags are separate from the tags you use for your own posts.', 'friends' );
+						echo '<br>';
+						esc_html_e( 'If you like to avoid an increased number of taxonomy terms in your database, you can disable this, although tags indicating a mention for local users will always be applied.', 'friends' );
+						?>
+						</p>
+					</fieldset>
+				</td>
+			</tr>
+			<tr>
 				<th scope="row" rowspan="3"><?php esc_html_e( 'Frontend', 'friends' ); ?></th>
 				<td>
 					<fieldset>
@@ -257,18 +262,6 @@ do_action( 'friends_settings_before_form' );
 						</p>
 				</td>
 			</tr>
-			<?php if ( ! function_exists( 'classicpress_version' ) ) : ?>
-			<tr>
-				<td>
-					<fieldset>
-						<label for="blocks_everywhere">
-							<input name="blocks_everywhere" type="checkbox" id="blocks_everywhere" value="1" <?php checked( '1', $args['blocks_everywhere'] ); ?> disabled="disabled" />
-							<span><?php esc_html_e( 'Unfortunately, Gutenberg on the frontend is currently unavailable.', 'friends' ); ?></span>
-						</label>
-					</fieldset>
-				</td>
-			</tr>
-			<?php endif; ?>
 		</tbody>
 	</table>
 	<?php do_action( 'friends_settings_form_bottom' ); ?>
@@ -291,5 +284,17 @@ do_action( 'friends_settings_before_form' );
 		</p>
 	<?php endif; ?>
 </form>
+<?php if ( current_user_can( 'manage_options' ) ) : ?>
+<h2><?php esc_html_e( 'Advanced', 'friends' ); ?></h2>
+<p>
+	<?php
+	printf(
+		/* translators: %s is a link to the migrations page. */
+		esc_html__( 'Database migrations can be managed on the %s page.', 'friends' ),
+		'<a href="' . esc_url( admin_url( 'admin.php?page=friends-migrations' ) ) . '">' . esc_html__( 'Migrations', 'friends' ) . '</a>'
+	);
+	?>
+</p>
+<?php endif; ?>
 <?php
 do_action( 'friends_settings_after_form' );

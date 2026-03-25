@@ -39,20 +39,7 @@ class Third_Parties {
 	 * Register the WordPress hooks
 	 */
 	private function register_hooks() {
-		add_filter( 'option_fx-private-site', array( $this, 'fx_private_site' ) );
 		add_filter( 'wp_sweep_excluded_taxonomies', array( $this, 'wp_sweep_excluded_taxonomies' ) );
-	}
-
-	/**
-	 * Allow accessing the private feed when the FX Private Site plugin is installed.
-	 *
-	 * @param mixed $value  Value of the option.
-	 */
-	public function fx_private_site( $value ) {
-		if ( $this->friends->access_control->feed_is_authenticated() ) {
-			$value['enable'] = false;
-		}
-		return $value;
 	}
 
 	/**
@@ -65,6 +52,6 @@ class Third_Parties {
 	 * @return array
 	 */
 	public function wp_sweep_excluded_taxonomies( $excluded_taxonomies ) {
-		return array_merge( $excluded_taxonomies, array( User_Feed::TAXONOMY, User_Feed::POST_TAXONOMY, Subscription::TAXONOMY ) );
+		return array_merge( $excluded_taxonomies, array( User_Feed::TAXONOMY, Subscription::TAXONOMY ) );
 	}
 }

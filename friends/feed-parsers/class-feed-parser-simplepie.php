@@ -39,6 +39,19 @@ class Feed_Parser_SimplePie extends Feed_Parser_V2 {
 	}
 
 	/**
+	 * Get the badge for RSS/Atom feeds.
+	 *
+	 * @return array Badge info.
+	 */
+	public function get_badge() {
+		return array(
+			'label' => 'RSS',
+			'color' => '#5b9a68',
+			'title' => __( 'RSS/Atom Feed', 'friends' ),
+		);
+	}
+
+	/**
 	 * Determines if this is a supported feed and to what degree we feel it's supported.
 	 *
 	 * @param      string      $url        The url.
@@ -158,7 +171,8 @@ class Feed_Parser_SimplePie extends Feed_Parser_V2 {
 
 		$feed = new \SimplePie();
 
-		$feed->set_sanitize_class( '\WP_SimplePie_Sanitize_KSES' );
+		$feed->get_registry()->register( \SimplePie\Sanitize::class, '\WP_SimplePie_Sanitize_KSES', true );
+
 		// We must manually overwrite $feed->sanitize because SimplePie's
 		// constructor sets it before we have a chance to set the sanitization class.
 		$feed->sanitize = new \WP_SimplePie_Sanitize_KSES();
@@ -241,10 +255,10 @@ class Feed_Parser_SimplePie extends Feed_Parser_V2 {
 
 		switch ( $host ) {
 			case 'github.com':
-				$feed->set_file_class( __NAMESPACE__ . '\SimplePie_File_Accept_Only_RSS' );
+				$feed->get_registry()->register( 'File', __NAMESPACE__ . '\SimplePie_File_Accept_Only_RSS' );
 				break;
 			default:
-				$feed->set_file_class( '\WP_SimplePie_File' );
+				$feed->get_registry()->register( 'File', '\WP_SimplePie_File' );
 		}
 		/**
 		 * Maybe Rewrite a URL
@@ -332,18 +346,21 @@ class Feed_Parser_SimplePie extends Feed_Parser_V2 {
 				}
 			}
 
-			foreach ( $item->get_enclosures() as $enclosure ) {
-				if ( ! isset( $enclosure->link ) ) {
-					continue;
-				}
+			$enclosures = $item->get_enclosures();
+			if ( is_array( $enclosures ) ) {
+				foreach ( $enclosures as $enclosure ) {
+					if ( ! isset( $enclosure->link ) ) {
+						continue;
+					}
 
-				$feed_item->enclosure = array_filter(
-					array(
-						'url'    => $enclosure->get_link(),
-						'type'   => $enclosure->get_type(),
-						'length' => $enclosure->get_length(),
-					)
-				);
+					$feed_item->enclosure = array_filter(
+						array(
+							'url'    => $enclosure->get_link(),
+							'type'   => $enclosure->get_type(),
+							'length' => $enclosure->get_length(),
+						)
+					);
+				}
 			}
 
 			if ( is_object( $item->get_author() ) ) {
@@ -359,10 +376,44 @@ class Feed_Parser_SimplePie extends Feed_Parser_V2 {
 			$feed_item->date         = $item->get_gmdate( 'U' );
 			$feed_item->updated_date = $item->get_updated_gmdate( 'U' );
 
+			$tags = $this->extract_hashtags( $feed_item );
+			if ( ! empty( $tags ) ) {
+				$feed_item->friend_tags = $tags;
+			}
+
 			$feed_items[] = $feed_item;
 		}
 
 		return $feed_items;
+	}
+
+	/**
+	 * Extract hashtags from a feed item's content and title
+	 *
+	 * @param Feed_Item $feed_item The feed item.
+	 * @return array Array of hashtag strings
+	 */
+	public function extract_hashtags( $feed_item ) {
+		$tags = array();
+
+		$text = '';
+		if ( ! empty( $feed_item->title ) ) {
+			$text .= $feed_item->title . ' ';
+		}
+		if ( ! empty( $feed_item->content ) ) {
+			$text .= wp_strip_all_tags( $feed_item->content );
+		}
+
+		if ( preg_match_all( '/#([A-Za-z0-9_-]+)/', $text, $matches ) ) {
+			foreach ( $matches[1] as $hashtag ) {
+				$tag_name = sanitize_title( strtolower( $hashtag ) );
+				if ( ! empty( $tag_name ) && strlen( $tag_name ) > 1 ) {
+					$tags[] = $tag_name;
+				}
+			}
+		}
+
+		return array_unique( $tags );
 	}
 
 	public function no_comments_feed_available( $text, $post_id ) {
@@ -391,11 +442,6 @@ class Feed_Parser_SimplePie extends Feed_Parser_V2 {
 		$comments_url = get_post_meta( $post_id, Feed::COMMENTS_FEED_META, true );
 		if ( ! $comments_url || ! $friend_user || ! $user_feed ) {
 			return $comments;
-		}
-
-		if ( ( $friend_user->is_friend_url( $comments_url ) && Friends::has_required_privileges() ) || wp_doing_cron() ) {
-			$comments_url = apply_filters( 'friends_friend_private_feed_url', $comments_url, $friend_user );
-			$comments_url = Friends::get_instance()->access_control->append_auth( $comments_url, $friend_user, 300 );
 		}
 
 		$items = $this->fetch_feed( $comments_url, $user_feed );

@@ -21,7 +21,6 @@ use WP_Error;
  */
 class User_Feed {
 	const TAXONOMY = 'friend-user-feed';
-	const POST_TAXONOMY = 'friend-post-feed';
 	const INTERVAL_BACKTRACK = 600;
 
 	/**
@@ -68,32 +67,20 @@ class User_Feed {
 	}
 
 	/**
-	 * Gets the URL (= the term name).
+	 * Gets the URL. For ActivityPub feeds linked to an ap_actor, this returns
+	 * the URL from the ap_actor post (the source of truth). Otherwise returns
+	 * the term name.
 	 *
-	 * @return string The URL (= the term name).
+	 * @return string The feed URL.
 	 */
 	public function get_url() {
+		$ap_actor_url = $this->get_ap_actor_url();
+		if ( $ap_actor_url ) {
+			return $ap_actor_url;
+		}
 		return $this->term->name;
 	}
 
-	/**
-	 * Get the private URL of the friend (= append authentication).
-	 *
-	 * @param      int $validity  The validity in seconds.
-	 *
-	 * @return     string  The (extended) URL.
-	 */
-	public function get_private_url( $validity = 3600 ) {
-		$feed_url = $this->get_url();
-		$friend_user = $this->get_friend_user();
-
-		if ( $friend_user && $friend_user instanceof User && $friend_user->is_friend_url( $feed_url ) && ( friends::has_required_privileges() || wp_doing_cron() ) ) {
-			$friends = Friends::get_instance();
-			$feed_url = $friends->access_control->append_auth( $feed_url, $friend_user, $validity );
-		}
-
-		return apply_filters( 'friends_friend_private_feed_url', $feed_url, $friend_user );
-	}
 
 	/**
 	 * Get the local feed URL. Dysfunctional at the moment.
@@ -136,27 +123,14 @@ class User_Feed {
 	 * @return array(User) The associated users.
 	 */
 	public function get_all_friend_users() {
-		$users = array();
-		$user_term_ids = get_objects_in_term( $this->term->term_id, self::TAXONOMY );
-		foreach ( $user_term_ids as $user_term_id ) {
-			$user = User::get_user_by_id( $user_term_id );
-			if ( $user ) {
-				$feeds = $user->get_feeds();
-				if ( isset( $feeds[ $this->term->term_id ] ) ) {
-					$users[] = $user;
-					continue;
-				}
-			}
-			$user = User::get_user_by_id( 1e10 + $user_term_id );
-			if ( $user ) {
-				$feeds = $user->get_feeds();
-				if ( isset( $feeds[ $this->term->term_id ] ) ) {
-					$users[] = $user;
-					continue;
-				}
+		if ( $this->term->parent ) {
+			$term = get_term( $this->term->parent, Subscription::TAXONOMY );
+			if ( ! is_wp_error( $term ) && $term ) {
+				return array( new Subscription( $term ) );
 			}
 		}
-		return $users;
+
+		return array();
 	}
 
 	/**
@@ -193,6 +167,73 @@ class User_Feed {
 	 */
 	public function get_mime_type() {
 		return self::validate_mime_type( get_metadata( 'term', $this->term->term_id, 'mime-type', true ) );
+	}
+
+	/**
+	 * Gets the linked ActivityPub actor post ID.
+	 *
+	 * @return int|null The ap_actor post ID, or null if not linked.
+	 */
+	public function get_ap_actor_id() {
+		if ( ! class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			return null;
+		}
+
+		$object_ids = get_objects_in_term( $this->term->term_id, self::TAXONOMY );
+		if ( is_wp_error( $object_ids ) || empty( $object_ids ) ) {
+			return null;
+		}
+
+		foreach ( $object_ids as $object_id ) {
+			if ( 'ap_actor' === get_post_type( $object_id ) ) {
+				return (int) $object_id;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Checks if this feed is linked to an ActivityPub actor.
+	 *
+	 * @return bool True if this is an ActivityPub feed with a linked actor.
+	 */
+	public function is_activitypub_feed() {
+		return 'activitypub' === $this->get_parser() && null !== $this->get_ap_actor_id();
+	}
+
+	/**
+	 * Gets the URL from the linked ActivityPub actor post.
+	 *
+	 * @return string|null The actor URL from the ap_actor post, or null if not available.
+	 */
+	public function get_ap_actor_url() {
+		$ap_actor_id = $this->get_ap_actor_id();
+		if ( ! $ap_actor_id ) {
+			return null;
+		}
+
+		$ap_actor = get_post( $ap_actor_id );
+		if ( ! $ap_actor ) {
+			return null;
+		}
+
+		return $ap_actor->guid;
+	}
+
+	/**
+	 * Sets the linked ActivityPub actor post ID.
+	 *
+	 * @param int $ap_actor_id The ap_actor post ID.
+	 * @return array|false|\WP_Error Array of term taxonomy IDs on success, false or WP_Error on failure.
+	 */
+	public function set_ap_actor_id( $ap_actor_id ) {
+		// Ensure taxonomy is registered for ap_actor post type (may not be during cron).
+		if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			register_taxonomy_for_object_type( self::TAXONOMY, \Activitypub\Collection\Remote_Actors::POST_TYPE );
+		}
+
+		return wp_set_object_terms( absint( $ap_actor_id ), $this->term->term_id, self::TAXONOMY );
 	}
 
 	/**
@@ -407,36 +448,25 @@ class User_Feed {
 	 */
 	public static function register_taxonomy() {
 		$args = array(
-			'labels'            => array(
-				'name'          => _x( 'Posts from Feed', 'taxonomy general name', 'friends' ),
-				'singular_name' => _x( 'Post from Feed', 'taxonomy singular name', 'friends' ),
-				'menu_name'     => __( 'Post from Feed', 'friends' ),
-			),
-			'hierarchical'      => false,
-			'show_ui'           => true,
-			'show_admin_column' => true,
-			'query_var'         => true,
-			'rewrite'           => false,
-			'public'            => false,
-		);
-		register_taxonomy( self::POST_TAXONOMY, 'post', $args );
-		register_taxonomy_for_object_type( self::POST_TAXONOMY, 'post' );
-
-		$args = array(
-			'labels'            => array(
+			'labels'                => array(
 				'name'          => _x( 'Feed URL', 'taxonomy general name', 'friends' ),
 				'singular_name' => _x( 'Feed URL', 'taxonomy singular name', 'friends' ),
 				'menu_name'     => __( 'Feed URL', 'friends' ),
 			),
-			'hierarchical'      => false,
-			'show_ui'           => true,
-			'show_admin_column' => true,
-			'query_var'         => true,
-			'rewrite'           => false,
-			'public'            => false,
+			'hierarchical'          => true,
+			'show_ui'               => false,
+			'show_admin_column'     => false,
+			'query_var'             => true,
+			'rewrite'               => false,
+			'public'                => false,
+			'update_count_callback' => '_update_generic_term_count',
 		);
-		register_taxonomy( self::TAXONOMY, 'user', $args );
-		register_taxonomy_for_object_type( self::TAXONOMY, 'user' );
+		register_taxonomy( self::TAXONOMY, array(), $args );
+
+		// Register for ap_actor post type if ActivityPub plugin is active.
+		if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			register_taxonomy_for_object_type( self::TAXONOMY, \Activitypub\Collection\Remote_Actors::POST_TYPE );
+		}
 
 		register_term_meta(
 			self::TAXONOMY,
@@ -563,49 +593,6 @@ class User_Feed {
 	}
 
 	/**
-	 * Saves multiple feeds for a user.
-	 *
-	 * See save() for possible options.
-	 *
-	 * @param      User  $friend_user  The associated user.
-	 * @param      array $feeds        The feeds in the format array( url => options ).
-	 *
-	 * @return     array      Array of the newly created terms.
-	 */
-	public static function save_multiple( User $friend_user, array $feeds ) {
-		$all_urls = array();
-		foreach ( wp_get_object_terms( $friend_user->ID, self::TAXONOMY ) as $term ) {
-			$all_urls[ $term->name ] = $term->term_id;
-		}
-
-		$term_ids = wp_set_object_terms( $friend_user->ID, array_keys( array_merge( $all_urls, $feeds ) ), self::TAXONOMY );
-		if ( is_wp_error( $term_ids ) ) {
-			return $term_ids;
-		}
-
-		foreach ( wp_get_object_terms( $friend_user->ID, self::TAXONOMY ) as $term ) {
-			$all_urls[ $term->name ] = $term->term_id;
-		}
-
-		foreach ( $feeds as $url => $options ) {
-			if ( ! isset( $all_urls[ $url ] ) ) {
-				continue;
-			}
-			$term_id = $all_urls[ $url ];
-			foreach ( $options as $key => $value ) {
-				if ( in_array( $key, array( 'active', 'parser', 'post-format', 'mime-type', 'title' ) ) ) {
-					if ( metadata_exists( 'term', $term_id, $key ) ) {
-						update_metadata( 'term', $term_id, $key, $value );
-					} else {
-						add_metadata( 'term', $term_id, $key, $value, true );
-					}
-				}
-			}
-		}
-		return $term_ids;
-	}
-
-	/**
 	 * Saves a new feed as a term for the user.
 	 *
 	 * @param  User   $friend_user The user to be associated.
@@ -712,8 +699,9 @@ class User_Feed {
 	public static function get_by_url( $url ) {
 		$term_query = new \WP_Term_Query(
 			array(
-				'taxonomy' => self::TAXONOMY,
-				'slug'     => $url,
+				'taxonomy'   => self::TAXONOMY,
+				'slug'       => $url,
+				'hide_empty' => false,
 			)
 		);
 		foreach ( $term_query->get_terms() as $term ) {
@@ -723,17 +711,35 @@ class User_Feed {
 		return new \WP_Error( 'term_not_found' );
 	}
 
+	/**
+	 * Get the feed linked to a specific ap_actor post ID.
+	 *
+	 * @param int $ap_actor_id The ap_actor post ID.
+	 * @return User_Feed|\WP_Error A User_Feed object or WP_Error if not found.
+	 */
+	public static function get_by_ap_actor_id( $ap_actor_id ) {
+		$terms = get_the_terms( $ap_actor_id, self::TAXONOMY );
+		if ( $terms && ! is_wp_error( $terms ) ) {
+			return new self( $terms[0] );
+		}
+
+		return new \WP_Error( 'term_not_found' );
+	}
+
 	public static function get_all_users() {
 		$term_query = new \WP_Term_Query(
 			array(
-				'taxonomy' => self::TAXONOMY,
+				'taxonomy'   => self::TAXONOMY,
+				'hide_empty' => false,
 			)
 		);
 		$users = array();
 		foreach ( $term_query->get_terms() as $term ) {
 			$feed = new self( $term );
 			$friend_user = $feed->get_friend_user();
-			$users[ $friend_user->ID ] = $friend_user;
+			if ( $friend_user ) {
+				$users[ $friend_user->ID ] = $friend_user;
+			}
 		}
 
 		return $users;
@@ -752,6 +758,7 @@ class User_Feed {
 				'taxonomy'   => self::TAXONOMY,
 				'meta_key'   => 'active', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
 				'meta_value' => true, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+				'hide_empty' => false,
 			)
 		);
 
@@ -788,6 +795,7 @@ class User_Feed {
 				'taxonomy'   => self::TAXONOMY,
 				'meta_key'   => 'parser', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
 				'meta_value' => $parser, // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+				'hide_empty' => false,
 			)
 		);
 		$feeds = array();

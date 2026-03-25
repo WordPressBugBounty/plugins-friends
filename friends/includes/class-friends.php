@@ -18,6 +18,7 @@ namespace Friends;
 class Friends {
 	const VERSION       = FRIENDS_VERSION;
 	const CPT           = 'friend_post_cache';
+	const TAG_TAXONOMY  = Friend_Tag::TAXONOMY;
 	const FEED_URL      = 'friends-feed-url';
 	const PLUGIN_URL    = 'https://wordpress.org/plugins/friends/';
 	const REQUIRED_ROLE = 'edit_private_posts';
@@ -35,13 +36,6 @@ class Friends {
 	 * @var Admin
 	 */
 	public $admin;
-
-	/**
-	 * A reference to the Access_Control object.
-	 *
-	 * @var Access_Control
-	 */
-	public $access_control;
 
 	/**
 	 * A reference to the Feed object.
@@ -116,7 +110,6 @@ class Friends {
 	 * Constructor
 	 */
 	public function __construct() {
-		$this->access_control = new Access_Control( $this );
 		$this->admin          = new Admin( $this );
 		$this->feed           = new Feed( $this );
 		$this->messages       = new Messages( $this );
@@ -129,7 +122,8 @@ class Friends {
 		new Blocks( $this );
 		new Logging( $this );
 		new Shortcodes( $this );
-		new Automatic_Status( $this );
+		new Site_Health();
+		new Migration();
 		$this->register_hooks();
 		load_plugin_textdomain( 'friends', false, FRIENDS_PLUGIN_FILE . '/languages/' );
 
@@ -187,6 +181,7 @@ class Friends {
 	 */
 	private function register_hooks() {
 		add_action( 'init', array( $this, 'register_custom_post_type' ) );
+		add_action( 'init', array( $this, 'register_friend_tag_taxonomy' ) );
 		add_action( 'init', array( 'Friends\Subscription', 'register_taxonomy' ) );
 
 		add_action( 'init', array( 'Friends\User_Feed', 'register_taxonomy' ) );
@@ -200,7 +195,15 @@ class Friends {
 		add_filter( 'after_setup_theme', array( $this, 'enable_post_formats' ) );
 		add_filter( 'cron_schedules', array( $this, 'add_fifteen_minutes_interval' ) ); // phpcs:ignore WordPressVIPMinimum.Performance.IntervalInSeconds.IntervalInSeconds
 		add_action( 'cron_friends_delete_old_posts', array( $this, 'cron_friends_delete_outdated_posts' ) );
-		add_action( 'template_redirect', array( $this, 'disable_friends_author_page' ) );
+		add_action( 'friends_migrate_post_tags_batch', array( $this, 'cron_migrate_post_tags_batch' ) );
+		add_action( 'friends_migrate_ap_attributed_to_batch', array( $this, 'cron_migrate_ap_attributed_to_batch' ) );
+		add_action( 'friends_link_ap_feeds_batch', array( $this, 'cron_link_ap_feeds_batch' ) );
+		add_action( 'friends_backfill_external_attributed_to_batch', array( $this, 'cron_backfill_external_attributed_to_batch' ) );
+		add_action( 'friends_convert_replies_batch', array( $this, 'cron_convert_replies_batch' ) );
+		add_action( 'friends_convert_friend_users_batch', array( $this, 'cron_convert_friend_users_batch' ) );
+		add_action( 'friends_convert_single_reply', array( $this, 'convert_single_reply_to_comment' ) );
+		add_action( 'template_redirect', array( $this, 'redirect_trashed_reply_to_comment' ), 4 );
+		add_action( 'template_redirect', array( $this, 'fallback_redirect_via_comment_meta' ), 4 );
 
 		add_action( 'comment_form_defaults', array( $this, 'comment_form_defaults' ) );
 		add_filter( 'friends_frontend_post_types', array( $this, 'add_frontend_post_types' ) );
@@ -208,6 +211,13 @@ class Friends {
 		add_filter( 'request', array( $this, 'limit_post_format_request' ), 20 );
 		add_filter( 'my_apps_plugins', array( $this, 'register_my_apps' ) );
 		User::register_wrapper_hooks();
+	}
+
+	/**
+	 * Register the friend tag taxonomy
+	 */
+	public function register_friend_tag_taxonomy() {
+		Friend_Tag::register();
 	}
 
 	/**
@@ -233,7 +243,7 @@ class Friends {
 		$args = array(
 			'labels'              => $labels,
 			'description'         => "A cached friend's post",
-			'publicly_queryable'  => self::authenticated_for_posts(),
+			'publicly_queryable'  => is_admin() && self::is_main_user() && apply_filters( 'friends_show_cached_posts', false ),
 			'show_ui'             => true,
 			'show_in_menu'        => apply_filters( 'friends_show_cached_posts', false ),
 			'show_in_nav_menus'   => false,
@@ -245,7 +255,7 @@ class Friends {
 			'menu_position'       => 5,
 			'menu_icon'           => 'dashicons-groups',
 			'supports'            => array( 'title', 'editor', 'author', 'revisions', 'thumbnail', 'excerpt', 'comments', 'post-formats' ),
-			'taxonomies'          => array( 'post_tag', 'post_format', 'friend-reaction-' . get_current_user_id() ),
+			'taxonomies'          => array( self::TAG_TAXONOMY, 'post_format', 'friend-reaction-' . get_current_user_id() ),
 			'has_archive'         => true,
 			'rewrite'             => false,
 		);
@@ -325,31 +335,10 @@ class Friends {
 	public static function get_role_capabilities( $role ) {
 		$capabilities = array();
 
-		$capabilities['friend_request'] = array(
-			'friend_request' => true,
-		);
-
-		$capabilities['pending_friend_request'] = array(
-			'pending_friend_request' => true,
-		);
-
 		$capabilities['subscription'] = array(
-			'subscription' => true,
+			'subscription'   => true,
+			'friends_plugin' => true,
 		);
-
-		$capabilities['acquaintance'] = array(
-			'read'   => true,
-			'friend' => true,
-		);
-
-		// Friend is an Acquaintance who can read private posts.
-		$capabilities['friend'] = $capabilities['acquaintance'];
-		$capabilities['friend']['read_private_posts'] = true;
-
-		// All roles belonging to this plugin have the friends_plugin capability.
-		foreach ( array_keys( $capabilities ) as $type ) {
-			$capabilities[ $type ]['friends_plugin'] = true;
-		}
 
 		if ( ! isset( $capabilities[ $role ] ) ) {
 			return array();
@@ -363,11 +352,7 @@ class Friends {
 	 */
 	private static function setup_roles() {
 		$default_roles = array(
-			'friend'                 => _x( 'Friend', 'User role', 'friends' ),
-			'acquaintance'           => _x( 'Acquaintance', 'User role', 'friends' ),
-			'friend_request'         => _x( 'Friend Request', 'User role', 'friends' ),
-			'pending_friend_request' => _x( 'Pending Friend Request', 'User role', 'friends' ),
-			'subscription'           => _x( 'Subscription', 'User role', 'friends' ),
+			'subscription' => _x( 'Subscription', 'User role', 'friends' ),
 		);
 
 		$roles = new \WP_Roles();
@@ -393,53 +378,6 @@ class Friends {
 	}
 
 	/**
-	 * Creates a page /friends/ to enable customization via.
-	 */
-	public static function create_friends_page() {
-		$query = new \WP_Query(
-			array(
-				'name'      => 'friends',
-				'post_type' => 'page',
-			)
-		);
-		if ( $query->have_posts() ) {
-			return;
-		}
-		$content  = '<!-- wp:paragraph {"className":"only-friends"} -->' . PHP_EOL . '<p class="only-friends">';
-		$content .= __( 'Hi Friend!', 'friends' );
-		$content .= '<br/><br/>';
-		$content .= __( 'Do you know any of my friends? Maybe you want to become friends with them as well?', 'friends' );
-		$content .= PHP_EOL . '</p>' . PHP_EOL . '<!-- /wp:paragraph -->' . PHP_EOL;
-
-		$content .= '<!-- wp:friends/friends-list {"className":"only-friends","user_types":"friends"} /-->' . PHP_EOL;
-
-		$content .= '<!-- wp:paragraph {"className":"not-friends"} -->' . PHP_EOL . '<p class="not-friends">';
-		$content .= __( 'I have connected with my friends using <strong>WordPress</strong> and the <strong>Friends plugin</strong>. This means I can share private posts with just my friends while keeping my data under control.', 'friends' );
-		$content .= PHP_EOL;
-		// translators: %1$s and %2$s are URLs.
-		$content .= sprintf( __( 'If you also have a WordPress site with the friends plugin, you can send me a friend request. If not, get your own <a href="%1$s">WordPress</a> now, install the <a href="%2$s">Friends plugin</a>, and follow me!', 'friends' ), 'https://wordpress.org/', self::PLUGIN_URL );
-		$content .= PHP_EOL . '</p>' . PHP_EOL . '<!-- /wp:paragraph -->' . PHP_EOL;
-
-		$content .= '<!-- wp:friends/follow-me {"className":"not-friends"} -->' . PHP_EOL . '<div class="wp-block-friends-follow-me not-friends">';
-		$content .= '<form method="post"><!-- wp:paragraph -->' . PHP_EOL . '<p>';
-		$content .= __( 'Enter your blog URL to join my network. <a href="https://wpfriends.at/follow-me">Learn more</a>', 'friends' );
-		$content .= '</p>' . PHP_EOL;
-		$content .= '<!-- /wp:paragraph --><div><input type="text" name="friends_friend_request_url" placeholder="https://example.com/"/> <button>';
-		$content .= __( 'Follow this site', 'friends' );
-		$content .= '</button></div></form></div>' . PHP_EOL;
-		$content .= '</p>' . PHP_EOL . '<!-- /wp:friends/follow-me -->' . PHP_EOL;
-
-		$post_data = array(
-			'post_title'   => __( 'Friends', 'friends' ),
-			'post_content' => $content,
-			'post_type'    => 'page',
-			'post_name'    => 'friends',
-			'post_status'  => 'publish',
-		);
-		wp_insert_post( $post_data );
-	}
-
-	/**
 	 * Enable translated user roles.
 	 * props https://wordpress.stackexchange.com/a/141705/74893
 	 *
@@ -451,10 +389,6 @@ class Friends {
 	 */
 	public static function translate_user_role( $translations, $text, $context, $domain ) {
 		$roles = array(
-			'Friend',
-			'Acquaintance',
-			'Friend Request',
-			'Pending Friend Request',
 			'Subscription',
 		);
 
@@ -476,7 +410,7 @@ class Friends {
 	 * @return     array  The roles.
 	 */
 	public static function get_friends_plugin_roles() {
-		return apply_filters( 'friends_plugin_roles', array( 'friend', 'pending_friend_request', 'friend_request', 'subscription' ) );
+		return apply_filters( 'friends_plugin_roles', array( 'subscription' ) );
 	}
 
 	/**
@@ -496,21 +430,34 @@ class Friends {
 		}
 	}
 
+	public static function has_pending_migrations() {
+		$status = get_option( 'friends_migration_status' );
+		if ( ! $status || 'completed' === $status ) {
+			return false;
+		}
+		if ( is_numeric( $status ) && ( time() - intval( $status ) ) < 2 * DAY_IN_SECONDS ) {
+			return false;
+		}
+		require_once __DIR__ . '/class-migration.php';
+		if ( ! Migration::has_pending_tracked_migrations() ) {
+			return false;
+		}
+		return true;
+	}
+
 	public static function upgrade_plugin() {
 		$previous_version = get_option( 'friends_plugin_version' );
 
+		// Bail early if no migration is necessary.
+		if ( version_compare( $previous_version, Friends::VERSION, '>=' ) ) {
+			return;
+		}
+
+		// Load migration class for any upgrade.
+		require_once __DIR__ . '/class-migration.php';
+
 		if ( version_compare( $previous_version, '0.20.1', '<' ) ) {
-			$users = User_Query::all_associated_users();
-			foreach ( $users->get_results() as $user ) {
-				$gravatar = get_user_option( 'friends_gravatar', $user->ID );
-				$user_icon_url = get_user_option( 'friends_user_icon_url', $user->ID );
-				if ( $gravatar ) {
-					if ( ! $user_icon_url ) {
-						update_user_option( $user->ID, 'friends_user_icon_url', $gravatar );
-					}
-					delete_user_option( $user->ID, 'friends_gravatar' );
-				}
-			}
+			Migration::migrate_gravatar_to_user_icon_url();
 		}
 
 		if ( version_compare( $previous_version, '2.1.3', '<' ) ) {
@@ -518,64 +465,36 @@ class Friends {
 		}
 
 		if ( version_compare( $previous_version, '2.6.0', '<' ) ) {
-			$users = User_Query::all_associated_users();
-			foreach ( $users->get_results() as $user ) {
-				if ( get_option( 'friends_feed_rules_' . $user->ID ) ) {
-					$user->update_user_option( 'friends_feed_rules', get_option( 'friends_feed_rules_' . $user->ID ) );
-				}
-				if ( get_option( 'friends_feed_catch_all_' . $user->ID ) ) {
-					$user->update_user_option( 'friends_feed_catch_all', get_option( 'friends_feed_catch_all_' . $user->ID ) );
-				}
-			}
+			Migration::migrate_feed_options_to_user_options();
 		}
 
 		if ( version_compare( $previous_version, '2.8.7', '<' ) ) {
-			$users = User_Query::all_associated_users();
-			foreach ( $users->get_results() as $user ) {
-				if ( ! ( $user instanceof Subscription ) ) {
-					// We have a user that is not a virtual user, so the friendship functionality had been used.
-					update_option( 'friends_enable_wp_friendships', 1 );
-					break;
-				}
-			}
+			Migration::enable_wp_friendships_if_used();
 		}
 
 		if ( version_compare( $previous_version, '2.9.4', '<' ) ) {
-			// Migrate to the new External user.
-			$user = User::get_by_username( 'external-mentions' );
-			if ( $user && $user instanceof Subscription ) {
-				wp_update_term(
-					$user->get_term_id(),
-					Subscription::TAXONOMY,
-					array(
-						'slug' => 'external',
-						'name' => _x( 'External', 'user name', 'friends' ),
-					)
-				);
-				$user->update_user_option( 'display_name', _x( 'External', 'user name', 'friends' ) );
-			}
-
-			// Upgrade cron schedule.
-			$next_scheduled = wp_next_scheduled( 'cron_friends_refresh_feeds' );
-			if ( $next_scheduled ) {
-				$event = wp_get_scheduled_event( 'cron_friends_refresh_feeds' );
-				if ( $event && 'fifteen-minutes' !== $event->schedule ) {
-					wp_unschedule_event( $next_scheduled, 'cron_friends_refresh_feeds' );
-					$next_scheduled = false;
-				}
-			}
-			if ( ! $next_scheduled ) {
-				wp_schedule_event( time(), 'fifteen-minutes', 'cron_friends_refresh_feeds' );
-			}
+			Migration::migrate_external_user_and_cron();
 		}
 
 		if ( version_compare( $previous_version, '3.1.8', '<' ) ) {
-			// Migrate the option friends_frontend_default_view to a user option.
-			$users = User_Query::all_admin_users();
-			foreach ( $users->get_results() as $user ) {
-				$default_view = get_option( 'friends_frontend_default_view' );
-				if ( $default_view ) {
-					$user->update_user_option( 'friends_frontend_default_view', $default_view );
+			Migration::migrate_frontend_default_view_to_user_option();
+		}
+
+		if ( version_compare( $previous_version, '4.0.0', '<' ) ) {
+			Migration::migrate_post_tags_to_friend_tags();
+			Migration::backfill_mention_tags_from_mastodon_html();
+			Migration::migrate_activitypub_attributed_to();
+			Migration::import_activitypub_followings();
+			Migration::link_activitypub_feeds_to_actors();
+			Migration::link_feeds_as_term_children();
+
+			// Show the welcome/update screen if this is an upgrade (not a fresh install).
+			if ( $previous_version ) {
+				update_option( 'friends_welcome_version', '4.0' );
+				if ( Migration::has_pending_tracked_migrations() ) {
+					update_option( 'friends_migration_status', 'pending', false );
+				} else {
+					update_option( 'friends_migration_status', 'completed', false );
 				}
 			}
 		}
@@ -637,7 +556,6 @@ class Friends {
 	 */
 	private static function setup() {
 		self::setup_roles();
-		self::create_friends_page();
 
 		self::upgrade_plugin(
 			null,
@@ -654,10 +572,6 @@ class Friends {
 
 		if ( false === get_option( 'friends_private_rss_key' ) ) {
 			update_option( 'friends_private_rss_key', wp_generate_password( 128, false ) );
-		}
-
-		if ( false === get_option( 'friends_default_friend_role' ) ) {
-			update_option( 'friends_default_friend_role', 'friend' );
 		}
 
 		if ( ! wp_next_scheduled( 'cron_friends_refresh_feeds' ) ) {
@@ -866,16 +780,36 @@ class Friends {
 		}
 
 		$pagename_parts = explode( '/', trim( $pagename, '/' ) );
-		return count( $pagename_parts ) > 0 && 'friends' === $pagename_parts[0];
-	}
+		if ( count( $pagename_parts ) > 0 && 'friends' === $pagename_parts[0] ) {
+			return true;
+		}
+		// phpcs:disable WordPress.Security.NonceVerification.Recommended
+		// phpcs:disable WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+		if ( implode( '/', array_slice( $pagename_parts, 0, 2 ) ) === 'wp-admin/customize.php' && isset( $_REQUEST['url'] ) ) {
+			$pagename_parts = explode( '/', trim( str_replace( '://', '', wp_unslash( $_REQUEST['url'] ) ), '/' ) );
+			if ( count( $pagename_parts ) > 0 && 'friends' === $pagename_parts[1] ) {
+				return true;
+			}
+		}
 
-	/**
-	 * Check whether the request has been authenticated to display (private) posts.
-	 *
-	 * @return     bool  Whether the posts can be accessed.
-	 */
-	public static function authenticated_for_posts() {
-		return Access_Control::private_rss_is_authenticated() || ( is_admin() && self::is_main_user() && apply_filters( 'friends_show_cached_posts', false ) );
+		if ( implode( '/', array_slice( $pagename_parts, 0, 2 ) ) === 'wp-admin/site-editor.php' && isset( $_REQUEST['postId'] ) ) {
+			$pagename_parts = explode( '//', wp_unslash( $_REQUEST['postId'] ) );
+			if ( count( $pagename_parts ) > 0 && 'friends' === $pagename_parts[0] ) {
+				return true;
+			}
+		}
+		// phpcs:enable WordPress.Security.NonceVerification.Recommended
+		// phpcs:enable WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+
+		if ( implode( '/', array_slice( $pagename_parts, 0, 5 ) ) === 'wp-json/wp/v2/templates/friends' ) {
+			return true;
+		}
+
+		if ( implode( '/', array_slice( $pagename_parts, 0, 5 ) ) === 'wp-json/wp/v2/template-parts/friends' ) {
+			return true;
+		}
+
+		return false;
 	}
 
 	/**
@@ -1127,21 +1061,6 @@ class Friends {
 	}
 
 	/**
-	 * Disables the author page for friends users.
-	 */
-	public function disable_friends_author_page() {
-		global $wp_query;
-
-		if ( is_author() && ! self::authenticated_for_posts() ) {
-			$author_obj = $wp_query->get_queried_object();
-			if ( $author_obj instanceof \WP_User && User::is_friends_plugin_user( $author_obj ) && ! self::on_frontend() ) {
-				$wp_query->set_404();
-				status_header( 404 );
-			}
-		}
-	}
-
-	/**
 	 * Fix a bug in core where it outputs cached friend posts.
 	 *
 	 * @param array $qvs Query variables.
@@ -1245,7 +1164,7 @@ class Friends {
 			$tax_query['relation'] = 'AND';
 		}
 		$post_tag_query = array(
-			'taxonomy' => 'post_tag',
+			'taxonomy' => self::TAG_TAXONOMY,
 			'field'    => 'slug',
 			'operator' => 'IN',
 			'terms'    => $filter_by_post_tag,
@@ -1322,13 +1241,7 @@ class Friends {
 	 * Get all of the rel links for the HTML head.
 	 */
 	public static function get_link_rels() {
-		$rest_prefix = get_rest_url() . REST::PREFIX;
-		$links = array(
-			array(
-				'rel'  => 'friends-base-url',
-				'href' => $rest_prefix,
-			),
-		);
+		$links = array();
 
 		if ( get_option( 'friends_expose_post_format_feeds' ) && current_theme_supports( 'post-formats' ) ) {
 			$links = array_merge( $links, self::get_html_link_rel_alternate_post_formats() );
@@ -1477,6 +1390,158 @@ class Friends {
 			$friend_user->delete_outdated_posts();
 		}
 		$this->delete_outdated_posts();
+		$this->cleanup_orphaned_friend_tags();
+	}
+
+	/**
+	 * Cron function to process post tag migration batches.
+	 * Ensures the Migration class is loaded before calling the batch method.
+	 */
+	public function cron_migrate_post_tags_batch() {
+		require_once __DIR__ . '/class-migration.php';
+		Migration::migrate_post_tags_batch();
+	}
+
+	/**
+	 * Cron function to process ActivityPub attributedTo migration batches.
+	 * Ensures the Migration class is loaded before calling the batch method.
+	 */
+	public function cron_migrate_ap_attributed_to_batch() {
+		require_once __DIR__ . '/class-migration.php';
+		Migration::migrate_activitypub_attributed_to_batch();
+	}
+
+	/**
+	 * Cron function to process linking AP feeds to actors batches.
+	 * Ensures the Migration class is loaded before calling the batch method.
+	 */
+	public function cron_link_ap_feeds_batch() {
+		require_once __DIR__ . '/class-migration.php';
+		Migration::link_activitypub_feeds_to_actors_batch();
+	}
+
+	/**
+	 * Cron function to process backfilling External user attributedTo batches.
+	 * Ensures the Migration class is loaded before calling the batch method.
+	 */
+	public function cron_backfill_external_attributed_to_batch() {
+		require_once __DIR__ . '/class-migration.php';
+		Migration::backfill_external_attributed_to_batch();
+	}
+
+	/**
+	 * Cron function to process converting reply posts to comments batches.
+	 * Ensures the Migration class is loaded before calling the batch method.
+	 */
+	public function cron_convert_replies_batch() {
+		require_once __DIR__ . '/class-migration.php';
+		Migration::convert_replies_to_comments_batch();
+	}
+
+	/**
+	 * Cron function to process converting friend WP users to virtual subscriptions.
+	 * Ensures the Migration class is loaded before calling the batch method.
+	 */
+	public function cron_convert_friend_users_batch() {
+		require_once __DIR__ . '/class-migration.php';
+		Migration::convert_friend_users_batch();
+	}
+
+	/**
+	 * Convert a single reply post to a comment.
+	 * This is scheduled as a single cron event when a new reply post is created.
+	 *
+	 * @param int $post_id The post ID to convert.
+	 */
+	public function convert_single_reply_to_comment( $post_id ) {
+		$post = get_post( $post_id );
+		if ( ! $post || self::CPT !== $post->post_type ) {
+			return;
+		}
+
+		// Skip if already trashed (already processed).
+		if ( 'trash' === $post->post_status ) {
+			return;
+		}
+
+		require_once __DIR__ . '/class-migration.php';
+
+		// Create a simple object for the process method.
+		$post_obj = (object) array(
+			'ID'            => $post->ID,
+			'guid'          => $post->guid,
+			'post_author'   => $post->post_author,
+			'post_content'  => $post->post_content,
+			'post_date_gmt' => $post->post_date_gmt,
+		);
+
+		Migration::process_potential_reply_post( $post_obj );
+	}
+
+	/**
+	 * Redirect trashed reply posts to their comment equivalents.
+	 * When a reply post has been converted to a comment and trashed,
+	 * visitors to the old post URL are redirected to the comment.
+	 */
+	public function redirect_trashed_reply_to_comment() {
+		// Only handle single posts.
+		if ( ! is_singular( self::CPT ) ) {
+			return;
+		}
+
+		$post = get_queried_object();
+		if ( ! $post || 'trash' !== $post->post_status ) {
+			return;
+		}
+
+		$comment_id = get_post_meta( $post->ID, '_redirects_to_comment', true );
+		$redirect_post_id = get_post_meta( $post->ID, '_redirect_post_id', true );
+
+		if ( ! $comment_id || ! $redirect_post_id ) {
+			return;
+		}
+
+		$redirect_url = get_permalink( $redirect_post_id ) . '#comment-' . $comment_id;
+		wp_safe_redirect( $redirect_url, 301 );
+		exit;
+	}
+
+	/**
+	 * Fallback redirect for reply posts that have been permanently deleted.
+	 * Looks up the comment by its original post GUID stored in comment meta.
+	 */
+	public function fallback_redirect_via_comment_meta() {
+		// Only on 404.
+		if ( ! is_404() ) {
+			return;
+		}
+
+		// Get the requested URL.
+		$requested_url = home_url( add_query_arg( array() ) );
+
+		// Search for a comment that has this URL as its original post GUID.
+		global $wpdb;
+
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+		$comment = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT c.comment_ID, c.comment_post_ID
+				 FROM {$wpdb->comments} c
+				 INNER JOIN {$wpdb->commentmeta} cm ON c.comment_ID = cm.comment_id
+				 WHERE cm.meta_key = '_original_post_guid'
+				 AND cm.meta_value = %s
+				 LIMIT 1",
+				$requested_url
+			)
+		);
+
+		if ( ! $comment ) {
+			return;
+		}
+
+		$redirect_url = get_permalink( $comment->comment_post_ID ) . '#comment-' . $comment->comment_ID;
+		wp_safe_redirect( $redirect_url, 301 );
+		exit;
 	}
 
 	/**
@@ -1603,16 +1668,23 @@ class Friends {
 	}
 
 	/**
+	 * Clean up orphaned friend tags that have no posts.
+	 */
+	public function cleanup_orphaned_friend_tags() {
+		Friend_Tag::cleanup_orphaned();
+	}
+
+	/**
 	 * Delete all the data the plugin has stored in WordPress
 	 */
 	public static function uninstall_plugin() {
 		$taxonomies = array(
 			User_Feed::TAXONOMY,
-			User_Feed::POST_TAXONOMY,
 			Subscription::TAXONOMY,
+			self::TAG_TAXONOMY,
 		);
 
-		$affected_users = new \WP_User_Query( array( 'role__in' => array( 'friend', 'acquaintance', 'friend_request', 'pending_friend_request', 'subscription' ) ) );
+		$affected_users = new \WP_User_Query( array( 'role__in' => array( 'subscription' ) ) );
 		foreach ( $affected_users as $user ) {
 			$in_token = get_user_option( 'friends_in_token', $user->ID );
 			delete_option( 'friends_in_token_' . $in_token );
@@ -1623,10 +1695,7 @@ class Friends {
 		}
 
 		delete_option( 'friends_main_user_id' );
-		remove_role( 'friend' );
-		remove_role( 'acquaintance' );
-		remove_role( 'friend_request' );
-		remove_role( 'pending_friend_request' );
+
 		remove_role( 'subscription' );
 
 		$friend_posts = new \WP_Query(

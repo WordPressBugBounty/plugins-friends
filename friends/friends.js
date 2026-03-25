@@ -203,7 +203,7 @@
 
 	$( function () {
 		const standard_count = $( '.chip.post-count-standard' );
-		if ( standard_count.text().substr( 0, 3 ) === '...' ) {
+		if ( standard_count.text().substr( 0, 3 ) === '...' || standard_count.text().substr( 0, 1 ) === '…' ) {
 			wp.ajax.send( 'friends-get-post-counts', {
 				data: {
 					_ajax_nonce: standard_count.data( 'nonce' )
@@ -223,63 +223,7 @@
 		}
 	});
 
-	$document.on(
-		'click',
-		'a.friends-auth-link, button.comments.friends-auth-link',
-		function () {
-			const $this = jQuery( this );
-			const token = $this.data( 'token' );
-
-			if ( ! token ) {
-				return;
-			}
-			let href = $this.attr( 'href' );
-
-			const parts = token.split( /-/ );
-			const now = new Date();
-			if ( now / 1000 > parts[ 1 ] ) {
-				wp.ajax
-					.post( 'friends_refresh_link_token', {
-						_ajax_nonce: $this.data( 'nonce' ),
-						friend: $this.data( 'friend' ),
-						url: href,
-					} )
-					.done( function ( response ) {
-						if ( response.data ) {
-							$this.data( 'token', response.data.token );
-						}
-					} );
-
-				// eslint-disable-next-line no-alert
-				window.alert( friends.text_link_expired );
-				return false;
-			}
-
-			if ( href && href.indexOf( 'friend_auth=' ) < 0 ) {
-				let hash = href.indexOf( '#' );
-				if ( hash >= 0 ) {
-					hash = href.substr( hash );
-					href = href.substr( 0, href.length - hash.length );
-				} else {
-					hash = '';
-				}
-
-				if ( href.indexOf( '?' ) >= 0 ) {
-					href += '&';
-				} else {
-					href += '?';
-				}
-				href += 'friend_auth=' + token + hash;
-				$this.attr( 'href', href );
-			}
-
-			if ( $this.is( 'button' ) ) {
-				window.location.href = href;
-				return false;
-			}
-		}
-	);
-
+	
 	$( function () {
 		$( '#only_subscribe' ).on( 'change', function () {
 			$( this )
@@ -359,59 +303,16 @@
 		}
 	} );
 
-	$document.on( 'click', 'a.collapse-post, .collapsed.card, .all-collapsed .card:not(.uncollapsed)', function ( e ) {
-		if ( e.target.closest( '.friends-dropdown' ) || e.target.closest( 'a:not(.collapse-post)' ) ) {
-			return true;
-		}
-
-		const card = $( this ).closest( 'article' );
-		let collapsed;
-		if ( card.closest( 'section.all-collapsed' ).length ) {
-			card.toggleClass( 'uncollapsed' );
-			collapsed = ! card.is( '.uncollapsed' );
-		} else {
-			card.toggleClass( 'collapsed' );
-			collapsed = card.is( '.collapsed' );
-		}
-		if ( collapsed ) {
-			$( this )
-				.find( 'i.dashicons-fullscreen-exit-alt' )
-				.removeClass( 'dashicons-fullscreen-exit-alt' )
-				.addClass( 'dashicons-fullscreen-alt' );
-		} else {
-			$( this )
-				.find( 'i.dashicons-fullscreen-alt' )
-				.removeClass( 'dashicons-fullscreen-alt' )
-				.addClass( 'dashicons-fullscreen-exit-alt' );
-		}
-
-		return false;
-	} );
-
-	$document.on( 'click', 'a.toggle-compact', function () {
-		// Collapse-toggle all visible.
-		$( 'section.posts' ).toggleClass( 'all-collapsed' );
-		if ( $( 'section.posts' ).is( '.all-collapsed' ) ) {
-			$( 'a.toggle-compact').text( friends.text_expanded_mode );
-		} else {
-			$( 'a.toggle-compact').text( friends.text_compact_mode );
-		}
-		$( window ).trigger( 'scroll' );
-		return false;
-	} );
-
-	$document.on(
-		'dblclick',
-		'section.all-collapsed article, article.collapsed, article.uncollapsed',
-		function () {
-			$( this ).closest( 'article' ).find( 'a.collapse-post' ).trigger( 'click' );
-			return false;
-		}
-	);
 
 	function loadComments( commentsLink, callback ) {
 		const $this = $( commentsLink );
-		const content = $this.closest( 'article' ).find( '.comments-content' );
+		let content = $this.closest( 'article' ).find( '.comments-content' );
+		if ( ! content.length ) {
+			content = $this.closest( '.wp-block-friends-post-comments' ).find( '.comments-content' );
+		}
+		if ( ! content.length ) {
+			content = $this.closest( 'li' ).find( '.comments-content' );
+		}
 		if ( content.data( 'loaded' ) ) {
 			content.toggle();
 		} else {
@@ -442,7 +343,7 @@
 		}
 	}
 
-	$document.on( 'click', 'article a.comments', function ( e ) {
+	$document.on( 'click', 'article a.comments, .wp-block-friends-post-comments a.comments', function ( e ) {
 		if ( e.metaKey || e.altKey || e.shiftKey ) {
 			return;
 		}
@@ -527,32 +428,68 @@
 	/* Reactions */
 	$( function () {
 		$document.on( 'click', 'button.friends-reaction', function () {
+			const $this = $( this );
+			$this.addClass( 'loading' );
 			wp.ajax.send( 'friends-toggle-react', {
 				data: {
-					_ajax_nonce: $( this ).data( 'nonce' ),
-					post_id: $( this ).data( 'id' ),
-					reaction: $( this ).data( 'emoji' ),
+					_ajax_nonce: $this.data( 'nonce' ),
+					post_id: $this.data( 'id' ),
+					reaction: $this.data( 'emoji' ),
 				},
 				success() {
-					window.location.reload();
+					$this.removeClass( 'loading' );
+					var isPressed = $this.hasClass( 'pressed' );
+					$this.toggleClass( 'pressed' );
+					var textNodes = $this.contents().filter( function () {
+						return this.nodeType === 3;
+					} );
+					var count = parseInt( textNodes.last().text().trim(), 10 ) || 0;
+					var newCount = isPressed ? count - 1 : count + 1;
+					if ( newCount <= 0 ) {
+						$this.remove();
+					} else {
+						textNodes.last().replaceWith( ' ' + newCount );
+					}
+				},
+				error() {
+					$this.removeClass( 'loading' );
 				},
 			} );
 			return false;
 		} );
 
 		$( '.friends-reaction-picker' ).on( 'click', 'button', function () {
+			const $this = $( this );
+			const $picker = $this.closest( '.friends-reaction-picker' );
+			$this.addClass( 'loading' );
 			wp.ajax.send( 'friends-toggle-react', {
 				data: {
-					_ajax_nonce: $( this )
-						.closest( '.friends-reaction-picker' )
-						.data( 'nonce' ),
-					post_id: $( this )
-						.closest( '.friends-reaction-picker' )
-						.data( 'id' ),
-					reaction: $( this ).data( 'emoji' ),
+					_ajax_nonce: $picker.data( 'nonce' ),
+					post_id: $picker.data( 'id' ),
+					reaction: $this.data( 'emoji' ),
 				},
 				success() {
-					window.location.reload();
+					$this.removeClass( 'loading' );
+					var postId = $picker.data( 'id' );
+					var emoji = $this.data( 'emoji' );
+					var emojiChar = $this.text().trim();
+					var $footer = $picker.closest( '.card-footer, .entry-meta, .friends-post-footer, footer' );
+					var $existing = $footer.find( 'button.friends-reaction[data-emoji="' + emoji + '"]' );
+					if ( $existing.length ) {
+						var textNodes = $existing.contents().filter( function () {
+							return this.nodeType === 3;
+						} );
+						var count = parseInt( textNodes.last().text().trim(), 10 ) || 0;
+						textNodes.last().replaceWith( ' ' + ( count + 1 ) );
+						$existing.addClass( 'pressed' );
+					} else {
+						var nonce = $picker.data( 'nonce' );
+						var $btn = $( '<button class="btn btn-link ml-1 friends-action friends-reaction pressed" data-id="' + postId + '" data-emoji="' + emoji + '" data-nonce="' + nonce + '"><span>' + emojiChar + '</span> 1</button>' );
+						$picker.closest( '.friends-dropdown' ).before( $btn );
+					}
+				},
+				error() {
+					$this.removeClass( 'loading' );
 				},
 			} );
 			return false;
@@ -583,12 +520,14 @@
 	$( function () {
 		$document.on( 'click', 'a.friends-boost', function () {
 			const $this = $( this );
+			$this.addClass( 'loading' );
 			wp.ajax.send( 'friends-boost', {
 				data: {
 					_ajax_nonce: $this.data( 'nonce' ),
 					post_id: $this.data( 'id' ),
 				},
 				success( result ) {
+					$this.removeClass( 'loading' );
 					if ( 'boosted' === result ) {
 						$this
 							.find( 'i.friends-boost-status' )
@@ -607,6 +546,7 @@
 					}
 				},
 				fail( result ) {
+					$this.removeClass( 'loading' );
 					$this
 						.find( 'i.friends-boost-status' )
 						.addClass( 'dashicons dashicons-warning' )
@@ -662,7 +602,7 @@
 		return false;
 	} );
 
-	$document.on( 'mouseenter', 'h2#page-title a.dashicons', function () {
+	$document.on( 'mouseenter', 'h2#page-title a.dashicons, a.wp-block-friends-author-star.dashicons', function () {
 		if ( $( this ).hasClass( 'not-starred' ) ) {
 			if ( $( this ).hasClass( 'dashicons-star-empty' ) ) {
 				$( this )
@@ -678,7 +618,7 @@
 		}
 	} );
 
-	$document.on( 'mouseleave', 'h2#page-title a.dashicons', function () {
+	$document.on( 'mouseleave', 'h2#page-title a.dashicons, a.wp-block-friends-author-star.dashicons', function () {
 		if ( $( this ).hasClass( 'not-starred' ) ) {
 			if ( $( this ).hasClass( 'dashicons-star-filled' ) ) {
 				$( this )
@@ -696,7 +636,7 @@
 
 	$document.on(
 		'click',
-		'h2#page-title a.dashicons.starred, h2#page-title a.dashicons.not-starred',
+		'h2#page-title a.dashicons.starred, h2#page-title a.dashicons.not-starred, a.wp-block-friends-author-star.starred, a.wp-block-friends-author-star.not-starred',
 		function () {
 			let removeClass = 'dashicons-star-filled starred';
 			let addClass = 'dashicons-star-empty not-starred';
@@ -730,6 +670,54 @@
 		}
 	);
 
+	// Folder selector for subscriptions.
+	$document.on( 'change', '.friends-move-to-folder', function () {
+		const $select = $( this );
+		const friendId = $select.data( 'id' );
+		const nonce = $select.data( 'nonce' );
+		let folderId = $select.val();
+
+		if ( 'new' === folderId ) {
+			const name = prompt( friends.text_new_folder || 'Folder name:' );
+			if ( ! name ) {
+				$select.val( $select.data( 'current' ) || 0 );
+				return;
+			}
+			wp.ajax.send( 'friends-create-folder', {
+				data: {
+					name: name,
+					_ajax_nonce: nonce,
+				},
+				success( r ) {
+					// Add the new option and select it.
+					$select.find( 'option[value="new"]' ).before(
+						'<option value="' + r.term_id + '">' + r.name + '</option>'
+					);
+					$select.val( r.term_id );
+					$select.data( 'current', r.term_id );
+					// Now move the subscription to it.
+					wp.ajax.send( 'friends-move-to-folder', {
+						data: {
+							friend_id: friendId,
+							folder_id: r.term_id,
+							_ajax_nonce: nonce,
+						},
+					} );
+				},
+			} );
+			return;
+		}
+
+		$select.data( 'current', folderId );
+		wp.ajax.send( 'friends-move-to-folder', {
+			data: {
+				friend_id: friendId,
+				folder_id: folderId,
+				_ajax_nonce: nonce,
+			},
+		} );
+	} );
+
 	function getAcct( href ) {
 		const url = new URL( href );
 		const username = url.pathname.replace( /\/$/, '' ).split( '/' ).pop();
@@ -754,11 +742,16 @@
 		card.click();
 		$( this ).closest( '.friends-dropdown' ).hide();
 		openMenu = null;
-		const comments = $( this ).closest( '.card' ).find( '.comments' );
+		let comments = $( this ).closest( '.card' ).find( '.comments' );
+		if ( ! comments.length ) {
+			comments = $( this ).closest( 'li' ).find( '.comments' );
+		}
 
-		$( 'html, body' ).animate( {
-			scrollTop: comments.offset().top - 100,
-		}, 500 );
+		if ( comments.length ) {
+			$( 'html, body' ).animate( {
+				scrollTop: comments.offset().top - 100,
+			}, 500 );
+		}
 
 		loadComments( comments, function() {
 			// focus #comment textarea but put the cursor at the end

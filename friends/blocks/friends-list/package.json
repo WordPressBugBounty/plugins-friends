@@ -5,10 +5,10 @@
   "author": "Alex Kirk",
   "license": "GPL-2.0-or-later",
   "main": "build/index.js",
-  "homepage": "https://wpfriends.at/",
+  "homepage": "https://friends.kirk.at/",
   "repository": "git+https://github.com/akirk/friends.git",
   "devDependencies": {
-    "@wordpress/scripts": "^15.0.0"
+    "@wordpress/scripts": "^31.7.0"
   },
   "scripts": {
     "build": "wp-scripts build",

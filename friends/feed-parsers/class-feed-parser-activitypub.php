@@ -43,6 +43,9 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		\add_action( 'friends_add_friend_form_top', array( $this, 'friends_add_friend_form_top' ) );
 
 		\add_action( 'activitypub_inbox_create', array( $this, 'handle_received_create' ), 15, 2 );
+		\add_filter( 'friends_feed_badge', array( $this, 'friends_feed_badge' ), 10, 3 );
+		\add_filter( 'friends_feed_list_title', array( $this, 'friends_feed_list_title' ), 10, 3 );
+		\add_action( 'friends_edit_feed_content_top', array( $this, 'render_feed_edit_content' ), 10, 3 );
 		\add_action( 'activitypub_inbox_delete', array( $this, 'handle_received_delete' ), 15, 2 );
 		\add_action( 'activitypub_inbox_announce', array( $this, 'handle_received_announce' ), 15, 2 );
 		\add_action( 'activitypub_inbox_like', array( $this, 'handle_received_like' ), 15, 2 );
@@ -51,12 +54,11 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		\add_action( 'activitypub_inbox_update', array( $this, 'handle_received_update' ), 15, 2 );
 		\add_action( 'activitypub_handled_create', array( $this, 'activitypub_handled_create' ), 10, 4 );
 		\add_action( 'activitypub_interactions_follow_url', array( $this, 'activitypub_interactions_follow_url' ), 10, 2 );
+		\add_filter( 'activitypub_comment_post_id', array( $this, 'activitypub_comment_post_id' ), 10, 3 );
 
 		\add_action( 'friends_user_feed_activated', array( $this, 'queue_follow_user' ), 10 );
 		\add_action( 'friends_user_feed_deactivated', array( $this, 'queue_unfollow_user' ), 10 );
 		\add_action( 'friends_suggest_display_name', array( $this, 'suggest_display_name' ), 10, 2 );
-		\add_action( 'friends_feed_parser_activitypub_follow', array( $this, 'activitypub_follow_user' ), 10, 2 );
-		\add_action( 'friends_feed_parser_activitypub_unfollow', array( $this, 'activitypub_unfollow_user' ), 10, 2 );
 		\add_action( 'friends_feed_parser_activitypub_like', array( $this, 'activitypub_like_post' ), 10, 3 );
 		\add_action( 'friends_feed_parser_activitypub_unlike', array( $this, 'activitypub_unlike_post' ), 10, 3 );
 		\add_action( 'friends_feed_parser_activitypub_announce', array( $this, 'activitypub_announce' ), 10, 2 );
@@ -69,6 +71,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		\add_filter( 'friends_potential_avatars', array( $this, 'friends_potential_avatars' ), 10, 2 );
 		\add_filter( 'friends_suggest_user_login', array( $this, 'suggest_user_login_from_url' ), 10, 2 );
 		\add_filter( 'friends_author_avatar_url', array( $this, 'author_avatar_url' ), 10, 3 );
+		\add_filter( 'friends_author_url', array( $this, 'author_url' ), 10, 3 );
 
 		\add_action( 'template_redirect', array( $this, 'cache_reply_to_boost' ) );
 		\add_filter( 'the_content', array( $this, 'the_content' ), 99, 2 );
@@ -120,8 +123,12 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 		add_action( 'mastodon_api_account_following', array( $this, 'mastodon_api_account_following' ), 10, 2 );
 		add_action( 'mastodon_api_account', array( $this, 'mastodon_api_account' ), 9, 2 );
+		add_filter( 'mastodon_api_account', array( $this, 'mastodon_api_account_external_user' ), 15, 4 );
 		add_action( 'friends_message_form_accounts', array( $this, 'friends_message_form_accounts' ), 10, 2 );
 		add_action( 'friends_send_direct_message', array( $this, 'friends_send_direct_message' ), 20, 6 );
+
+		// Auto-create Friend subscription when following via ActivityPub plugin.
+		add_action( 'post_activitypub_add_to_outbox', array( $this, 'handle_outbox_follow' ), 10, 4 );
 	}
 
 	public function friends_add_friends_input_placeholder() {
@@ -171,10 +178,21 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	}
 
 
+	public static function count_followers( $user_id ) {
+		if ( method_exists( '\ActivityPub\Collection\Followers', 'count' ) ) {
+			return \ActivityPub\Collection\Followers::count( $user_id );
+		}
+		return \ActivityPub\Collection\Followers::count_followers( $user_id );
+	}
+
 	public static function determine_mastodon_api_user( $user_id ) {
 		static $user_id_map = array();
-		if ( isset( $user_id_map[ $user_id ] ) ) {
-			return $user_id_map[ $user_id ];
+		if ( null === $user_id ) {
+			return false;
+		}
+		$cache_key = is_scalar( $user_id ) ? $user_id : '';
+		if ( $cache_key && isset( $user_id_map[ $cache_key ] ) ) {
+			return $user_id_map[ $cache_key ];
 		}
 		$user = false;
 		if ( is_string( $user_id ) && ! is_numeric( $user_id ) ) {
@@ -192,7 +210,9 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				$user = User::get_user_by_id( 1e10 + $user_id );
 			}
 		}
-		$user_id_map[ $user_id ] = $user;
+		if ( $cache_key ) {
+			$user_id_map[ $cache_key ] = $user;
+		}
 		return $user;
 	}
 
@@ -214,64 +234,234 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			return $status;
 		}
 
-		$account = false;
 		$meta = get_post_meta( $post_id, self::SLUG, true );
-		if ( isset( $meta['attributedTo']['id'] ) && $meta['attributedTo']['id'] ) {
-			if ( isset( $meta['reblog'] ) && $meta['reblog'] ) {
-				$status->reblog = clone $status;
-				$status->reblog->account = clone $status->account;
-				$status->reblog->id = \Enable_Mastodon_Apps\Mastodon_API::remap_reblog_id( $status->reblog->id );
-			}
-			$friend_user = User::get_post_author( get_post( $post_id ) );
-			$external_user = $this->get_external_user();
-			$is_external_user = get_class( $external_user ) === get_class( $friend_user ) && $external_user->get_object_id() === $friend_user->get_object_id();
-			if ( $is_external_user ) {
-				$feed_url = get_post_meta( $post_id, 'feed_url', true );
-				if ( $feed_url ) {
-					$actor = self::convert_actor_to_mastodon_handle( $feed_url );
-					$account = new Entity_Account();
-					$account->id             = $feed_url;
-					$account->username       = strtok( $actor, '@' );
-					$account->acct           = $actor;
-					$account->display_name   = $friend_user->display_name;
-					$account->url            = $feed_url;
-					$account->note = $friend_user->description;
-					if ( ! $account->note ) {
-						$account->note = '';
-					}
 
-					$account->avatar = $friend_user->avatar;
-					if ( ! $account->avatar ) {
-						$account->avatar = '';
-					}
+		// Only process reblogs with attributedTo.
+		if ( ! isset( $meta['reblog'] ) || ! $meta['reblog'] || ! isset( $meta['attributedTo'] ) ) {
+			return $status;
+		}
 
-					$account->avatar_static = $account->avatar;
-					if ( isset( $meta['attributedTo']['header'] ) ) {
-						$account->header = $meta['attributedTo']['header'];
-					} else {
-						$account->header = 'https://files.mastodon.social/media_attachments/files/003/134/405/original/04060b07ddf7bb0b.png';
-					}
-					$account->header_static = $account->header;
-					$account->created_at = $status->created_at;
+		$attributed_to_url = self::get_actor_url_from_attributed_to( $meta['attributedTo'] );
+		if ( ! $attributed_to_url ) {
+			return $status;
+		}
+
+		$status->reblog = clone $status;
+		$status->reblog->account = clone $status->account;
+		$status->reblog->id = \Enable_Mastodon_Apps\Mastodon_API::remap_reblog_id( $status->reblog->id );
+
+		$account = false;
+		$friend_user = User::get_post_author( get_post( $post_id ) );
+		$external_user = $this->get_external_user();
+		$is_external_user = get_class( $external_user ) === get_class( $friend_user ) && $external_user->get_object_id() === $friend_user->get_object_id();
+
+		if ( $is_external_user ) {
+			$feed_url = get_post_meta( $post_id, 'feed_url', true );
+			if ( $feed_url ) {
+				$actor = self::convert_actor_to_mastodon_handle( $feed_url );
+				$account = new Entity_Account();
+				$account->id             = $feed_url;
+				$account->username       = strtok( $actor, '@' );
+				$account->acct           = $actor;
+				$account->display_name   = $friend_user->display_name;
+				$account->url            = $feed_url;
+				$account->note = $friend_user->description;
+				if ( ! $account->note ) {
+					$account->note = '';
 				}
-			} elseif ( $friend_user instanceof User ) {
-				$account = apply_filters( 'mastodon_api_account', null, $friend_user->ID, null, $post_id );
-			}
 
-			if ( $account instanceof Entity_Account ) {
-				$status->account = $account;
-				if ( isset( $meta['reblog'] ) && $meta['reblog'] ) {
-					$reblog_account = apply_filters( 'mastodon_api_account', null, $meta['attributedTo']['id'] );
-					if ( $reblog_account instanceof Entity_Account ) {
-						$status->reblog->account = $reblog_account;
-					} else {
-						$status->reblog->account->id = $meta['attributedTo']['id'];
-					}
+				$account->avatar = $friend_user->avatar;
+				if ( ! $account->avatar ) {
+					$account->avatar = '';
+				}
+
+				$account->avatar_static = $account->avatar;
+				$account->header = 'https://files.mastodon.social/media_attachments/files/003/134/405/original/04060b07ddf7bb0b.png';
+				$actor_metadata = self::get_actor_metadata_from_attributed_to( $meta['attributedTo'] );
+				if ( ! empty( $actor_metadata['header'] ) ) {
+					$account->header = $actor_metadata['header'];
+				}
+				$account->header_static = $account->header;
+				$account->created_at = $status->created_at;
+			}
+		} elseif ( $friend_user instanceof User ) {
+			$account = apply_filters( 'mastodon_api_account', null, $friend_user->ID, null, $post_id );
+		}
+
+		if ( $account instanceof Entity_Account ) {
+			$status->account = $account;
+
+			// Try to build reblog account from attributedTo metadata first (fast path).
+			$actor_metadata = self::get_actor_metadata_from_attributed_to( $meta['attributedTo'] );
+			if ( ! empty( $actor_metadata['preferredUsername'] ) ) {
+				$status->reblog->account->id = $attributed_to_url;
+				$status->reblog->account->username = $actor_metadata['preferredUsername'];
+				$status->reblog->account->acct = self::convert_actor_to_mastodon_handle( $attributed_to_url );
+				if ( ! empty( $actor_metadata['name'] ) ) {
+					$status->reblog->account->display_name = $actor_metadata['name'];
+				}
+				if ( ! empty( $actor_metadata['summary'] ) ) {
+					$status->reblog->account->note = $actor_metadata['summary'];
+				}
+				if ( ! empty( $actor_metadata['icon'] ) ) {
+					$status->reblog->account->avatar = $actor_metadata['icon'];
+					$status->reblog->account->avatar_static = $actor_metadata['icon'];
+				}
+				if ( ! empty( $actor_metadata['header'] ) ) {
+					$status->reblog->account->header = $actor_metadata['header'];
+					$status->reblog->account->header_static = $actor_metadata['header'];
+				}
+				$status->reblog->account->url = $attributed_to_url;
+			} else {
+				// Fall back to filter chain if metadata is insufficient.
+				$reblog_account = apply_filters( 'mastodon_api_account', null, $attributed_to_url );
+				if ( $reblog_account instanceof Entity_Account ) {
+					$status->reblog->account = $reblog_account;
 				}
 			}
 		}
 
 		return $status;
+	}
+
+	/**
+	 * Get the badge for ActivityPub feeds.
+	 *
+	 * @return array Badge info.
+	 */
+	public function get_badge() {
+		return array(
+			'label' => 'AP',
+			'color' => '#f6ad55',
+			'title' => __( 'ActivityPub', 'friends' ),
+		);
+	}
+
+	/**
+	 * Filter the feed title to use actor name as fallback for ActivityPub feeds.
+	 *
+	 * @param string    $title  The feed title.
+	 * @param User_Feed $feed   The feed object.
+	 * @param string    $parser The parser slug.
+	 * @return string The feed title.
+	 */
+	public function friends_feed_list_title( $title, $feed, $parser ) {
+		if ( 'activitypub' !== $parser || $title ) {
+			return $title;
+		}
+
+		if ( ! \class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			return $title;
+		}
+
+		// Try to get actor by post ID first.
+		$ap_actor_id = $feed->get_ap_actor_id();
+		$ap_actor_post = $ap_actor_id ? \get_post( $ap_actor_id ) : null;
+
+		// Fallback: look up by URL.
+		if ( ! $ap_actor_post || 'ap_actor' !== $ap_actor_post->post_type ) {
+			$ap_actor_post = \Activitypub\Collection\Remote_Actors::get_by_uri( $feed->get_url() );
+		}
+
+		if ( $ap_actor_post && ! is_wp_error( $ap_actor_post ) ) {
+			return $ap_actor_post->post_title;
+		}
+
+		return $title;
+	}
+
+	/**
+	 * Filter the feed badge for ActivityPub feeds to add extra info.
+	 *
+	 * @param array|null $badge     The badge array.
+	 * @param User_Feed  $user_feed The user feed.
+	 * @param string     $parser    The parser slug.
+	 * @return array|null The badge array.
+	 */
+	public function friends_feed_badge( $badge, $user_feed, $parser ) {
+		if ( 'activitypub' !== $parser ) {
+			return $badge;
+		}
+
+		if ( $user_feed && $user_feed->get_ap_actor_id() ) {
+			$badge['title'] = __( 'Linked to ActivityPub plugin', 'friends' );
+		}
+
+		return $badge;
+	}
+
+	/**
+	 * Render extra content in the feed edit section for ActivityPub feeds.
+	 *
+	 * @param User_Feed $feed      The feed being edited.
+	 * @param int       $term_id   The term ID of the feed.
+	 * @param string    $parser    The parser slug.
+	 */
+	public function render_feed_edit_content( $feed, $term_id, $parser ) {
+		if ( 'activitypub' !== $parser ) {
+			return;
+		}
+
+		if ( ! \class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			return;
+		}
+
+		// Try to get actor by post ID first, then by URL.
+		$ap_actor_id = $feed->get_ap_actor_id();
+		$ap_actor_post = $ap_actor_id ? \get_post( $ap_actor_id ) : null;
+		$ap_actor_source = $ap_actor_id ? 'taxonomy' : null;
+
+		// Fallback: look up by URL if we have the post type but not a valid post.
+		if ( ! $ap_actor_post || 'ap_actor' !== $ap_actor_post->post_type ) {
+			$ap_actor_post = \Activitypub\Collection\Remote_Actors::get_by_uri( $feed->get_url() );
+			if ( $ap_actor_post && ! is_wp_error( $ap_actor_post ) ) {
+				$ap_actor_id = $ap_actor_post->ID;
+				$ap_actor_source = 'url_lookup';
+			}
+		}
+
+		if ( ! $ap_actor_post || is_wp_error( $ap_actor_post ) ) {
+			return;
+		}
+
+		$ap_actor_acct = \Activitypub\Collection\Remote_Actors::get_acct( $ap_actor_id );
+		?>
+		<div class="activitypub-plugin-data">
+			<div class="ap-section-header"><?php \esc_html_e( 'ActivityPub Plugin', 'friends' ); ?></div>
+			<input type="hidden" name="feeds[<?php echo \esc_attr( $term_id ); ?>][url]" value="<?php echo \esc_attr( $feed->get_url() ); ?>" />
+			<div class="ap-data-grid">
+				<span class="ap-data-label"><?php \esc_html_e( 'Actor', 'friends' ); ?></span>
+				<span class="ap-data-value">
+					<span class="ap-actor-name"><?php echo \esc_html( $ap_actor_post->post_title ); ?></span>
+					<?php if ( $ap_actor_acct ) : ?>
+						<span class="ap-actor-acct">@<?php echo \esc_html( $ap_actor_acct ); ?></span>
+					<?php endif; ?>
+				</span>
+				<span class="ap-data-label"><?php \esc_html_e( 'Profile', 'friends' ); ?></span>
+				<span class="ap-data-value">
+					<a href="<?php echo \esc_url( $ap_actor_post->guid ); ?>" target="_blank" rel="noopener noreferrer"><?php echo \esc_html( $ap_actor_post->guid ); ?></a>
+				</span>
+				<span class="ap-data-label"><?php \esc_html_e( 'Actor Post', 'friends' ); ?></span>
+				<span class="ap-data-value">
+					<code>ap_actor</code>
+					<a href="<?php echo \esc_url( \admin_url( 'post.php?post=' . $ap_actor_id . '&action=edit' ) ); ?>">ID <?php echo \esc_html( $ap_actor_id ); ?></a>
+					<em style="color: <?php echo 'taxonomy' === $ap_actor_source ? 'green' : 'orange'; ?>;">(<?php echo \esc_html( $ap_actor_source ); ?>)</em>
+				</span>
+			</div>
+			<div class="ap-section-footer">
+				<?php
+				echo \wp_kses(
+					\sprintf(
+						/* translators: %s is a link to the ActivityPub following list. */
+						\__( 'Managed by the <a href="%s">ActivityPub plugin</a>.', 'friends' ),
+						\esc_url( \admin_url( 'users.php?page=activitypub-following-list' ) )
+					),
+					array( 'a' => array( 'href' => array() ) )
+				);
+				?>
+			</div>
+		</div>
+		<?php
 	}
 
 	public function suggest_display_name( $display_name, $url ) {
@@ -396,6 +586,74 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		return $user_data;
 	}
 
+	/**
+	 * Filter the Mastodon API account for posts from the External user.
+	 *
+	 * When a post is from an external user (someone you don't follow who mentioned you),
+	 * extract the actual actor information from the feed_url post meta.
+	 *
+	 * @param Entity_Account|null $account The current account object.
+	 * @param int                 $user_id The user ID.
+	 * @param mixed               $request The request object.
+	 * @param \WP_Post|null       $post    The post object.
+	 * @return Entity_Account|null The filtered account.
+	 */
+	public function mastodon_api_account_external_user( $account, $user_id, $request = null, $post = null ) {
+		if ( ! $post instanceof \WP_Post ) {
+			return $account;
+		}
+
+		if ( Friends::CPT !== $post->post_type ) {
+			return $account;
+		}
+
+		$meta = get_post_meta( $post->ID, self::SLUG, true );
+
+		// Check if this post has attributedTo metadata (ActivityPub post).
+		if ( ! is_array( $meta ) || ! isset( $meta['attributedTo'] ) ) {
+			return $account;
+		}
+
+		$attributed_to = self::get_actor_url_from_attributed_to( $meta['attributedTo'] );
+		if ( ! $attributed_to ) {
+			return $account;
+		}
+
+		$actor_metadata = self::get_actor_metadata_from_attributed_to( $meta['attributedTo'] );
+
+		// Use cached acct from AP plugin when available (avoids slow guid query).
+		$actor = null;
+		if ( ! empty( $meta['attributedTo']['ap_actor_id'] ) && class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			$actor = \Activitypub\Collection\Remote_Actors::get_acct( $meta['attributedTo']['ap_actor_id'] );
+		}
+		if ( ! $actor ) {
+			$actor = self::convert_actor_to_mastodon_handle( $attributed_to );
+		}
+		$account = new Entity_Account();
+		$account->id           = $attributed_to;
+		$account->username     = strtok( $actor, '@' );
+		$account->acct         = $actor;
+		$account->url          = $attributed_to;
+		$account->created_at   = new \DateTime( $post->post_date_gmt );
+		$account->display_name = '';
+		$account->note         = '';
+		$account->avatar       = '';
+		$account->avatar_static = '';
+
+		if ( ! empty( $actor_metadata['name'] ) ) {
+			$account->display_name = $actor_metadata['name'];
+		}
+		if ( ! empty( $actor_metadata['icon'] ) ) {
+			$account->avatar = $actor_metadata['icon'];
+			$account->avatar_static = $actor_metadata['icon'];
+		}
+		if ( ! empty( $actor_metadata['summary'] ) ) {
+			$account->note = $actor_metadata['summary'];
+		}
+
+		return $account;
+	}
+
 	public function friends_message_form_accounts( $accounts, User $friend_user ) {
 		foreach ( $friend_user->get_feeds() as $user_feed ) {
 			if ( 'activitypub' === $user_feed->get_parser() ) {
@@ -499,17 +757,17 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			}
 
 			$sender_name = false;
-			if ( ! empty( $meta['name'] ) ) {
-				$sender_name = $meta['name'];
-			} elseif ( ! empty( $meta['preferredUsername'] ) ) {
-				$sender_name = $meta['preferredUsername'];
+			if ( ! empty( $actor['name'] ) ) {
+				$sender_name = $actor['name'];
+			} elseif ( ! empty( $actor['preferredUsername'] ) ) {
+				$sender_name = $actor['preferredUsername'];
 			}
 
-			if ( isset( $meta['id'] ) ) {
+			if ( isset( $actor['id'] ) ) {
 				if ( $sender_name ) {
-					$sender_name .= ' (@' . self::convert_actor_to_mastodon_handle( $meta['id'] ) . ')';
+					$sender_name .= ' (@' . self::convert_actor_to_mastodon_handle( $actor['id'] ) . ')';
 				} else {
-					$sender_name = '@' . self::convert_actor_to_mastodon_handle( $meta['id'] );
+					$sender_name = '@' . self::convert_actor_to_mastodon_handle( $actor['id'] );
 				}
 			} elseif ( ! $sender_name ) {
 				$sender_name = '@' . self::convert_actor_to_mastodon_handle( $actor_url );
@@ -628,7 +886,10 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			$feed_details['additional-info'] = 'You will follow as <tt>' . $actor->get_webfinger() . '</tt>';
 		}
 
-		$feed_details['suggested-username'] = str_replace( ' ', '-', sanitize_user( $meta['name'] ) );
+		if ( ! empty( $meta['preferredUsername'] ) ) {
+			$host = wp_parse_url( $feed_details['url'], PHP_URL_HOST );
+			$feed_details['suggested-username'] = User::sanitize_username( $meta['preferredUsername'] . '.' . $host );
+		}
 
 		return $feed_details;
 	}
@@ -813,24 +1074,150 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	}
 
 	public function get_activitypub_actor( $user_id ) {
-		return \Activitypub\Collection\Actors::get_by_id( $this->get_activitypub_actor_id( $user_id ) );
+		return \Activitypub\Collection\Actors::get_by_id( self::get_activitypub_actor_id( $user_id ) );
 	}
 
-	public function get_activitypub_actor_id( $user_id ) {
-		if ( null !== $user_id && ! \Activitypub\user_can_activitypub( $user_id ) ) {
+	public static function get_activitypub_actor_id( $user_id ) {
+		if ( null !== $user_id && \function_exists( '\Activitypub\user_can_activitypub' ) && ! \Activitypub\user_can_activitypub( $user_id ) ) {
 			$user_id = null;
 		}
 		if ( null === $user_id ) {
 			$user_id = Friends::get_main_friend_user_id();
 			if ( \defined( 'ACTIVITYPUB_ACTOR_MODE' ) ) {
-				$activitypub_actor_mode = \get_option( 'activitypub_actor_mode', ACTIVITYPUB_ACTOR_MODE );
-				if ( ACTIVITYPUB_BLOG_MODE === $activitypub_actor_mode ) {
+				$activitypub_actor_mode = \get_option( 'activitypub_actor_mode', \ACTIVITYPUB_ACTOR_MODE );
+				if ( \ACTIVITYPUB_BLOG_MODE === $activitypub_actor_mode ) {
 					$user_id = \Activitypub\Collection\Actors::BLOG_USER_ID;
 				}
 			}
 		}
 
 		return $user_id;
+	}
+
+	/**
+	 * Get the actor URL from a remote actor post ID.
+	 *
+	 * @param int $ap_actor_id The ap_actor post ID.
+	 * @return string|null The actor URL, or null if not found.
+	 */
+	public static function get_actor_url_from_remote_actor_id( $ap_actor_id ) {
+		if ( empty( $ap_actor_id ) || ! is_numeric( $ap_actor_id ) ) {
+			return null;
+		}
+
+		$actor_post = get_post( $ap_actor_id );
+		if ( ! $actor_post || 'ap_actor' !== $actor_post->post_type ) {
+			return null;
+		}
+
+		// The guid contains the canonical actor URL.
+		return $actor_post->guid;
+	}
+
+	/**
+	 * Get the actor URL from attributedTo metadata.
+	 *
+	 * This method handles both the new format (ap_actor_id) and the legacy format (id/URL)
+	 * for backward compatibility.
+	 *
+	 * @param array $attributed_to The attributedTo metadata array.
+	 * @return string|null The actor URL, or null if not found.
+	 */
+	public static function get_actor_url_from_attributed_to( $attributed_to ) {
+		if ( ! is_array( $attributed_to ) ) {
+			return null;
+		}
+
+		// New format: use ap_actor_id to look up the URL.
+		if ( isset( $attributed_to['ap_actor_id'] ) && $attributed_to['ap_actor_id'] ) {
+			$url = self::get_actor_url_from_remote_actor_id( $attributed_to['ap_actor_id'] );
+			if ( $url ) {
+				return $url;
+			}
+		}
+
+		// Legacy format: the URL is stored directly in 'id'.
+		if ( isset( $attributed_to['id'] ) && $attributed_to['id'] ) {
+			return $attributed_to['id'];
+		}
+
+		return null;
+	}
+
+	/**
+	 * Get actor metadata from attributedTo.
+	 *
+	 * Returns actor metadata (name, icon, summary, preferredUsername, header) using the
+	 * ActivityPub plugin's Remote_Actors API for the new format, or from legacy inline data.
+	 *
+	 * @param array $attributed_to The attributedTo metadata array.
+	 * @return array Actor metadata with keys: url, name, icon, summary, preferredUsername, header.
+	 */
+	public static function get_actor_metadata_from_attributed_to( $attributed_to ) {
+		$metadata = array(
+			'url'               => null,
+			'name'              => '',
+			'icon'              => '',
+			'header'            => '',
+			'summary'           => '',
+			'preferredUsername' => '',
+		);
+
+		if ( ! is_array( $attributed_to ) ) {
+			return $metadata;
+		}
+
+		// New format: fetch from ap_actor using ActivityPub plugin API.
+		if ( isset( $attributed_to['ap_actor_id'] ) && $attributed_to['ap_actor_id'] ) {
+			$ap_actor_id = $attributed_to['ap_actor_id'];
+
+			if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+				$actor = \Activitypub\Collection\Remote_Actors::get_actor( $ap_actor_id );
+
+				if ( $actor && ! is_wp_error( $actor ) ) {
+					$metadata['url'] = $actor->get_id();
+					$metadata['name'] = $actor->get_name() ?? '';
+					$metadata['summary'] = $actor->get_summary() ?? '';
+					$metadata['preferredUsername'] = $actor->get_preferred_username() ?? '';
+					$metadata['icon'] = \Activitypub\Collection\Remote_Actors::get_avatar_url( $ap_actor_id );
+
+					$image = $actor->get_image();
+					if ( $image ) {
+						$metadata['header'] = \Activitypub\object_to_uri( $image );
+					}
+
+					return $metadata;
+				}
+			}
+
+			// Fallback: try to get URL from the post directly.
+			$url = self::get_actor_url_from_remote_actor_id( $ap_actor_id );
+			if ( $url ) {
+				$metadata['url'] = $url;
+			}
+		}
+
+		// Legacy format: use inline data.
+		if ( isset( $attributed_to['id'] ) ) {
+			$metadata['url'] = $attributed_to['id'];
+		}
+		if ( isset( $attributed_to['name'] ) ) {
+			$metadata['name'] = $attributed_to['name'];
+		}
+		if ( isset( $attributed_to['icon'] ) ) {
+			$metadata['icon'] = $attributed_to['icon'];
+		}
+		if ( isset( $attributed_to['header'] ) ) {
+			$metadata['header'] = $attributed_to['header'];
+		}
+		if ( isset( $attributed_to['summary'] ) ) {
+			$metadata['summary'] = $attributed_to['summary'];
+		}
+		if ( isset( $attributed_to['preferredUsername'] ) ) {
+			$metadata['preferredUsername'] = $attributed_to['preferredUsername'];
+		}
+
+		return $metadata;
 	}
 
 	/**
@@ -852,7 +1239,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		return $user;
 	}
 
-	private function get_external_mentions_feed() {
+	public function get_external_mentions_feed() {
 		require_once __DIR__ . '/activitypub/class-virtual-user-feed.php';
 		$user = $this->get_external_user();
 		return new Virtual_User_Feed( $user, __( 'External Mentions', 'friends' ) );
@@ -877,14 +1264,19 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 
 		$meta = get_post_meta( $post->ID, self::SLUG, true );
-		if ( isset( $meta['attributedTo']['id'] ) && $meta['attributedTo']['id'] ) {
-			$mentions[ $meta['attributedTo']['id'] ] = $meta['attributedTo']['id'];
+		$attributed_to_url = isset( $meta['attributedTo'] ) ? self::get_actor_url_from_attributed_to( $meta['attributedTo'] ) : null;
+		if ( $attributed_to_url ) {
+			$mentions[ $attributed_to_url ] = $attributed_to_url;
 		}
 
 		return $mentions;
 	}
 
 	public static function extract_html_mentions( $content ) {
+		if ( ! class_exists( '\WP_HTML_Tag_Processor' ) ) {
+			return $content;
+		}
+
 		$tags = new \WP_HTML_Tag_Processor( $content );
 		$mentions = array();
 		while ( $tags->next_tag(
@@ -962,6 +1354,19 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			return;
 		}
 
+		// Check if this is a reply to an existing Friends post - if so, let the ActivityPub plugin handle it as a comment.
+		if ( 'create' === $type && ! empty( $activity['object']['inReplyTo'] ) ) {
+			$in_reply_to = $activity['object']['inReplyTo'];
+			if ( is_array( $in_reply_to ) ) {
+				$in_reply_to = reset( $in_reply_to );
+			}
+			$reply_to_post_id = Feed::url_to_postid( $in_reply_to );
+			if ( $reply_to_post_id ) {
+				// This is a reply to an existing Friends post - skip processing and let ActivityPub handle it as a comment.
+				return false;
+			}
+		}
+
 		if ( 'undo' === $type ) {
 			if ( ! isset( $activity['object'] ) ) {
 				return false;
@@ -999,11 +1404,21 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 		$actor_url = $activity['actor'];
 		$user_feed = false;
-		if ( Friends::check_url( $actor_url ) ) {
-			// Let's check if we follow this actor. If not it might be a different URL representation.
+
+		// First try to find by ap_actor_id (more robust for URL variations).
+		if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) && Friends::check_url( $actor_url ) ) {
+			$ap_actor_post = \Activitypub\Collection\Remote_Actors::get_by_uri( $actor_url );
+			if ( ! is_wp_error( $ap_actor_post ) ) {
+				$user_feed = User_Feed::get_by_ap_actor_id( $ap_actor_post->ID );
+			}
+		}
+
+		// Fall back to URL-based lookup.
+		if ( ( ! $user_feed || is_wp_error( $user_feed ) ) && Friends::check_url( $actor_url ) ) {
 			$user_feed = $this->friends_feed->get_user_feed_by_url( $actor_url );
 		}
 
+		// If both failed and URL might need resolution, try metadata lookup.
 		if ( is_wp_error( $user_feed ) || ! Friends::check_url( $actor_url ) ) {
 			$meta = $this->get_metadata( $actor_url );
 			if ( ! $meta || is_wp_error( $meta ) || ! isset( $meta['url'] ) ) {
@@ -1021,7 +1436,19 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				$this->log( 'Received invalid meta url for ' . $actor_url );
 				return false;
 			}
-			$user_feed = $this->friends_feed->get_user_feed_by_url( $actor_url );
+
+			// Try ap_actor_id lookup with resolved URL first.
+			if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+				$ap_actor_post = \Activitypub\Collection\Remote_Actors::get_by_uri( $actor_url );
+				if ( ! is_wp_error( $ap_actor_post ) ) {
+					$user_feed = User_Feed::get_by_ap_actor_id( $ap_actor_post->ID );
+				}
+			}
+
+			// Fall back to URL-based lookup with resolved URL.
+			if ( ! $user_feed || is_wp_error( $user_feed ) ) {
+				$user_feed = $this->friends_feed->get_user_feed_by_url( $actor_url );
+			}
 		}
 
 		if ( ! $user_feed || is_wp_error( $user_feed ) ) {
@@ -1046,6 +1473,15 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 		if ( $item instanceof Feed_Item ) {
 			$i = $this->friends_feed->process_incoming_feed_items( array( $item ), $user_feed );
+
+			// If this is a reply and the user was mentioned, queue for background conversion to comment.
+			if ( 'create' === $type && ! empty( $activity['object']['inReplyTo'] ) && ! empty( $item->friend_mention_tags ) ) {
+				$post_id = Feed::url_to_postid( $item->permalink );
+				if ( $post_id && Friend_Tag::has_mention( $post_id ) ) {
+					wp_schedule_single_event( time() + 30, 'friends_convert_single_reply', array( $post_id ) );
+				}
+			}
+
 			return $item;
 		}
 
@@ -1062,14 +1498,44 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	 * @return Feed_Item|null The feed item or null if it's not a valid activity.
 	 */
 	protected function process_incoming_activity( $type, $activity, $user_id, $user_feed ) {
+		$tags = array();
+		$mention_tags = array();
+
+		// Extract mention tags from CC field - if the current user is in CC, add their mention tag.
+		if ( isset( $activity['cc'] ) && is_array( $activity['cc'] ) ) {
+			$my_activitypub_id = (string) $this->get_activitypub_actor( $user_id );
+			if ( in_array( $my_activitypub_id, (array) $activity['cc'], true ) ) {
+				$local_user = get_userdata( $user_id );
+				if ( $local_user ) {
+					$mention_tags[] = Friend_Tag::mention_tag( $local_user->user_login );
+				}
+			}
+		}
+
+		// Extract hashtags from ActivityPub object tags.
+		if ( isset( $activity['object']['tag'] ) && is_array( $activity['object']['tag'] ) ) {
+			foreach ( $activity['object']['tag'] as $tag ) {
+				if ( isset( $tag['type'] ) && 'Hashtag' === $tag['type'] && isset( $tag['name'] ) ) {
+					$tag_name = ltrim( $tag['name'], '#' );
+					$tag_name = sanitize_title( $tag_name );
+					if ( ! empty( $tag_name ) ) {
+						$tags[] = $tag_name;
+					}
+				}
+			}
+		}
+
 		switch ( $type ) {
 			case 'create':
-				return $this->handle_incoming_create( $activity['object'] );
+				return $this->handle_incoming_create( $activity['object'], $tags, $mention_tags );
 			case 'update':
 				if ( isset( $activity['object']['type'] ) && 'Person' === $activity['object']['type'] ) {
+					if ( ! $user_feed instanceof User_Feed ) {
+						return null;
+					}
 					return $this->handle_incoming_update_person( $activity['object'], $user_feed );
 				}
-				$item = $this->handle_incoming_create( $activity['object'] );
+				$item = $this->handle_incoming_create( $activity['object'], $tags, $mention_tags );
 				if ( isset( $activity['object']['type'] ) && 'Note' === $activity['object']['type'] ) {
 					$friend_user = $user_feed->get_friend_user();
 					$post_id = Feed::url_to_postid( $item->permalink );
@@ -1131,8 +1597,10 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	 * We received a post for a feed, handle it.
 	 *
 	 * @param      array $activity     The object from ActivityPub.
+	 * @param      array $tags         Optional hashtags to attach to the item.
+	 * @param      array $mention_tags Optional mention tags to attach to the item.
 	 */
-	private function handle_incoming_create( $activity ) {
+	private function handle_incoming_create( $activity, $tags = array(), $mention_tags = array() ) {
 		$permalink = $activity['id'];
 		if ( isset( $activity['url'] ) ) {
 			if ( is_array( $activity['url'] ) ) {
@@ -1153,10 +1621,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			self::SLUG     => array(),
 		);
 
-		if ( isset( $activity['reblog'] ) && $activity['reblog'] ) {
-			$data[ self::SLUG ]['reblog'] = $activity['reblog'];
-		}
-
+		// Set author for all posts from attributedTo.
 		if ( isset( $activity['attributedTo'] ) ) {
 			$meta = $this->get_metadata( $activity['attributedTo'] );
 			$this->log( 'Attributed to ' . $activity['attributedTo'], compact( 'meta' ) );
@@ -1168,25 +1633,24 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 					$data['author'] = $meta['preferredUsername'];
 				}
 
-				$data[ self::SLUG ]['attributedTo'] = array(
-					'id' => $meta['id'],
-				);
-				if ( ! empty( $meta['icon']['url'] ) ) {
-					$data[ self::SLUG ]['attributedTo']['icon'] = $meta['icon']['url'];
-				}
+				// Store attributedTo for avatar/author URL display.
+				$actor_url = isset( $meta['id'] ) ? $meta['id'] : $activity['attributedTo'];
 
-				if ( ! empty( $meta['summary'] ) ) {
-					$data[ self::SLUG ]['attributedTo']['summary'] = $meta['summary'];
-				}
-
-				if ( ! empty( $meta['preferredUsername'] ) ) {
-					$data[ self::SLUG ]['attributedTo']['preferredUsername'] = $meta['preferredUsername'];
-				}
-
-				if ( ! empty( $meta['name'] ) ) {
-					$data[ self::SLUG ]['attributedTo']['name'] = $meta['name'];
+				if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+					$actor_post = \Activitypub\Collection\Remote_Actors::fetch_by_uri( $actor_url );
+					if ( ! is_wp_error( $actor_post ) && $actor_post instanceof \WP_Post ) {
+						$data[ self::SLUG ]['attributedTo'] = array( 'ap_actor_id' => $actor_post->ID );
+					} else {
+						$data[ self::SLUG ]['attributedTo'] = array( 'id' => $actor_url );
+					}
+				} else {
+					$data[ self::SLUG ]['attributedTo'] = array( 'id' => $actor_url );
 				}
 			}
+		}
+
+		if ( isset( $activity['reblog'] ) && $activity['reblog'] ) {
+			$data[ self::SLUG ]['reblog'] = $activity['reblog'];
 		}
 
 		if ( isset( $activity['application'] ) && $activity['application'] ) {
@@ -1290,13 +1754,36 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				} elseif ( strpos( $attachment['mediaType'], 'video/' ) === 0 ) {
 					$data['content'] .= PHP_EOL;
 					$data['content'] .= '<!-- wp:video -->';
-					$data['content'] .= '<figure class="wp-block-video"><video src="' . esc_url( $attachment['url'] ) . '" type="' . esc_attr( $attachment['mediaType'] ) . '">';
+					$data['content'] .= '<figure class="wp-block-video"><video controls src="' . esc_url( $attachment['url'] ) . '" type="' . esc_attr( $attachment['mediaType'] ) . '">';
+					$data['content'] .= '</video>';
 					if ( ! empty( $attachment['name'] ) ) {
 						$data['content'] .= '<figcaption class="wp-element-caption">' . esc_html( $attachment['name'] ) . '</figcaption>';
 					}
 					$data['content'] .= '</figure>';
 					$data['content'] .= '<!-- /wp:video -->';
 				}
+			}
+		}
+
+		if ( ! empty( $tags ) && is_array( $tags ) ) {
+			$data['friend_tags'] = $tags;
+		}
+
+		// These are separate so that they won't be faked.
+		if ( ! empty( $mention_tags ) && is_array( $mention_tags ) ) {
+			$data['friend_mention_tags'] = $mention_tags;
+		}
+
+		// Store mention URLs for reply filtering in modify_incoming_item.
+		if ( ! empty( $activity['tag'] ) && is_array( $activity['tag'] ) ) {
+			$mention_urls = array();
+			foreach ( $activity['tag'] as $tag ) {
+				if ( isset( $tag['type'] ) && 'Mention' === $tag['type'] && isset( $tag['href'] ) ) {
+					$mention_urls[] = $tag['href'];
+				}
+			}
+			if ( ! empty( $mention_urls ) ) {
+				$data['_mention_urls'] = $mention_urls;
 			}
 		}
 
@@ -1427,7 +1914,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		$object['published'] = gmdate( 'Y-m-d H:i:s', strtotime( $published_date ) );
 		$object['reblog'] = true;
 
-		return $this->handle_incoming_create( $object );
+		return $this->handle_incoming_create( $object, array(), array() );
 	}
 
 	/**
@@ -1466,13 +1953,40 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 	public function author_avatar_url( $avatar_url, $friend_user, $post_id ) {
 		$meta = get_post_meta( $post_id, self::SLUG, true );
-		if ( ! $meta ) {
+		if ( ! $meta || ! isset( $meta['attributedTo'] ) ) {
 			return $avatar_url;
 		}
-		if ( isset( $meta['attributedTo']['icon'] ) ) {
-			return $meta['attributedTo']['icon'];
+		$actor_metadata = self::get_actor_metadata_from_attributed_to( $meta['attributedTo'] );
+		if ( ! empty( $actor_metadata['icon'] ) ) {
+			return $actor_metadata['icon'];
 		}
 		return $avatar_url;
+	}
+
+	/**
+	 * Filter the author URL for a post.
+	 *
+	 * @param string $author_url The author URL.
+	 * @param User   $friend_user The friend user.
+	 * @param int    $post_id The post ID.
+	 * @return string The filtered author URL.
+	 */
+	public function author_url( $author_url, $friend_user, $post_id ) {
+		// Only override the URL for the External user.
+		// Regular subscriptions should link to their local friends page.
+		if ( self::EXTERNAL_USERNAME !== $friend_user->user_login ) {
+			return $author_url;
+		}
+
+		$meta = get_post_meta( $post_id, self::SLUG, true );
+		if ( ! $meta || ! isset( $meta['attributedTo'] ) ) {
+			return $author_url;
+		}
+		$actor_metadata = self::get_actor_metadata_from_attributed_to( $meta['attributedTo'] );
+		if ( ! empty( $actor_metadata['url'] ) ) {
+			return $actor_metadata['url'];
+		}
+		return $author_url;
 	}
 
 
@@ -1565,6 +2079,14 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				$new_feed = $friend->save_feed( $feed['url'], $feed );
 			}
 
+			// Link the new feed to the ap_actor post for the new URL.
+			if ( $new_feed instanceof User_Feed && class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+				$actor_post = \Activitypub\Collection\Remote_Actors::fetch_by_uri( $feed['url'] );
+				if ( ! is_wp_error( $actor_post ) && $actor_post instanceof \WP_Post ) {
+					$new_feed->set_ap_actor_id( $actor_post->ID );
+				}
+			}
+
 			// Since the URL has changed, the above will create a new feed, therefore we need to delete the old one.
 			$user_feed->delete();
 
@@ -1634,11 +2156,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			return;
 		}
 
-		$queued = $this->queue(
-			'friends_feed_parser_activitypub_follow',
-			array( $user_feed->get_url() ),
-			'friends_feed_parser_activitypub_unfollow'
-		);
+		$queued = \Activitypub\follow( $user_feed->get_url(), self::get_activitypub_actor_id( null ) );
 
 		if ( $queued ) {
 			$user_feed->update_last_log( __( 'Queued follow request.', 'friends' ) );
@@ -1648,54 +2166,133 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	}
 
 	/**
-	 * Follow a user via ActivityPub at a URL.
+	 * Handle Follow activities added to the ActivityPub outbox.
 	 *
-	 * @param      string $url    The url.
-	 * @param      int    $user_id   The current user id.
+	 * When someone follows a user via the ActivityPub plugin (not through Friends),
+	 * this method auto-creates a corresponding Friends subscription.
+	 *
+	 * @param int    $outbox_activity_id The outbox activity post ID.
+	 * @param object $activity           The Activity object.
+	 * @param int    $user_id            The user ID.
+	 * @param string $content_visibility The content visibility.
 	 */
-	public function activitypub_follow_user( $url, $user_id = null ) {
-		$user_id = $this->get_activitypub_actor_id( $user_id );
-		$actor = $this->get_activitypub_actor( $user_id );
-		$meta = $this->get_metadata( $url );
-		$user_feed = User_Feed::get_by_url( $url );
-		if ( is_wp_error( $meta ) ) {
-			if ( $user_feed instanceof User_Feed ) {
-				$user_feed->update_last_log(
-					sprintf(
-						// translators: %s an error message.
-						__( 'Error: %s', 'friends' ),
-						$meta->get_error_code() . ' ' . $meta->get_error_message()
-					)
-				);
+	public function handle_outbox_follow( $outbox_activity_id, $activity, $user_id, $content_visibility ) {
+		// Only process Follow activities.
+		if ( ! $activity || 'Follow' !== $activity->get_type() ) {
+			return;
+		}
+
+		$actor_url = $activity->get_object();
+		if ( empty( $actor_url ) || ! is_string( $actor_url ) ) {
+			return;
+		}
+
+		// Check if a Friends subscription already exists for this actor.
+		$existing_feed = User_Feed::get_by_url( $actor_url );
+		if ( $existing_feed instanceof User_Feed ) {
+			// Already have a subscription, ensure it's active.
+			if ( ! $existing_feed->get_active() ) {
+				$existing_feed->update_metadata( 'active', true );
 			}
+			return;
+		}
+
+		// Create a new Friends subscription for this actor.
+		$this->create_friend_subscription_from_actor( $actor_url );
+	}
+
+	/**
+	 * Create a Friends subscription from an ActivityPub actor URL.
+	 *
+	 * @param string $actor_url The ActivityPub actor URL.
+	 * @return Subscription|\WP_Error The created subscription or error.
+	 */
+	public function create_friend_subscription_from_actor( $actor_url ) {
+		$meta = $this->get_metadata( $actor_url );
+		if ( is_wp_error( $meta ) ) {
 			return $meta;
 		}
-		$to = $meta['id'];
-		$type = 'Follow';
-		$inbox = self::get_inbox_by_actor( $to, $type );
-		if ( is_wp_error( $inbox ) ) {
-			return $inbox;
+
+		if ( ! is_array( $meta ) || empty( $meta['preferredUsername'] ) ) {
+			return new \WP_Error( 'invalid_actor', 'Invalid actor metadata' );
 		}
 
-		$activity = new \Activitypub\Activity\Activity();
-		$activity->set_type( $type );
-		$activity->set_to( null );
-		$activity->set_cc( null );
-		$activity->set_actor( $actor );
-		$activity->set_object( $to );
-		$activity->set_id( $actor . '#follow-' . \preg_replace( '~^https?://~', '', $to ) );
-		$activity = $activity->to_json();
-		$response = \Activitypub\safe_remote_post( $inbox, $activity, $user_id );
+		// Generate a unique user login.
+		$host = wp_parse_url( $actor_url, PHP_URL_HOST );
+		$user_login = sanitize_title( $meta['preferredUsername'] . '.' . $host );
 
-		if ( $user_feed instanceof User_Feed ) {
-			$user_feed->update_last_log(
-				sprintf(
-				// translators: %s is the response from the remote server.
-					__( 'Sent follow request with response: %s', 'friends' ),
-					wp_remote_retrieve_response_code( $response ) . ' ' . wp_remote_retrieve_response_message( $response )
-				)
-			);
+		// Get the ap_actor post ID.
+		$ap_actor_id = null;
+		if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			$actor_post = \Activitypub\Collection\Remote_Actors::fetch_by_uri( $actor_url );
+			if ( ! is_wp_error( $actor_post ) && $actor_post instanceof \WP_Post ) {
+				$ap_actor_id = $actor_post->ID;
+			}
 		}
+
+		// Check if user already exists.
+		$existing_user = get_user_by( 'login', $user_login );
+		if ( $existing_user ) {
+			// User exists, try to get their feeds.
+			$user = User::get_user_by_id( $existing_user->ID );
+			if ( $user ) {
+				// Add the feed if it doesn't exist.
+				$feeds = $user->get_active_feeds();
+				foreach ( $feeds as $feed ) {
+					if ( $feed->get_url() === $actor_url ) {
+						// Ensure ap_actor_id is linked.
+						if ( $ap_actor_id && ! $feed->get_ap_actor_id() ) {
+							$feed->set_ap_actor_id( $ap_actor_id );
+						}
+						return $user; // Already have this feed.
+					}
+				}
+				// Add the feed.
+				$user_feed = $user->save_feed(
+					$actor_url,
+					array(
+						'parser' => self::SLUG,
+						'active' => true,
+						'title'  => $meta['name'] ?? $meta['preferredUsername'],
+					)
+				);
+				if ( $user_feed instanceof User_Feed && $ap_actor_id ) {
+					$user_feed->set_ap_actor_id( $ap_actor_id );
+				}
+				return $user;
+			}
+		}
+
+		// Create new subscription.
+		$subscription = Subscription::create(
+			$user_login,
+			'subscription',
+			$actor_url,
+			$meta['name'] ?? $meta['preferredUsername'],
+			isset( $meta['icon']['url'] ) ? $meta['icon']['url'] : null,
+			$meta['summary'] ?? null
+		);
+
+		if ( is_wp_error( $subscription ) ) {
+			return $subscription;
+		}
+
+		// Add the feed.
+		$user_feed = $subscription->save_feed(
+			$actor_url,
+			array(
+				'parser' => self::SLUG,
+				'active' => true,
+				'title'  => $meta['name'] ?? $meta['preferredUsername'],
+			)
+		);
+
+		// Link the feed to the ap_actor post.
+		if ( $user_feed instanceof User_Feed && $ap_actor_id ) {
+			$user_feed->set_ap_actor_id( $ap_actor_id );
+		}
+
+		return $subscription;
 	}
 
 	/**
@@ -1710,133 +2307,13 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			return false;
 		}
 
-		$queued = $this->queue(
-			'friends_feed_parser_activitypub_unfollow',
-			array( $user_feed->get_url() ),
-			'friends_feed_parser_activitypub_follow'
-		);
+		$queued = \Activitypub\unfollow( $user_feed->get_url(), self::get_activitypub_actor_id( null ) );
 
 		if ( $queued ) {
 			$user_feed->update_last_log( __( 'Queued unfollow request.', 'friends' ) );
 		}
 
 		return $queued;
-	}
-
-	/**
-	 * Unfllow a user via ActivityPub at a URL.
-	 *
-	 * @param      string $url    The url.
-	 * @param      int    $user_id   The current user id.
-	 */
-	public function activitypub_unfollow_user( $url, $user_id = null ) {
-		$user_id = $this->get_activitypub_actor_id( $user_id );
-		$actor = $this->get_activitypub_actor( $user_id );
-		$meta = $this->get_metadata( $url );
-		$user_feed = User_Feed::get_by_url( $url );
-		if ( is_wp_error( $meta ) ) {
-			if ( $user_feed instanceof User_Feed ) {
-				$user_feed->update_last_log(
-					sprintf(
-						// translators: %s an error message.
-						__( 'Error: %s', 'friends' ),
-						$meta->get_error_code() . ' ' . $meta->get_error_message()
-					)
-				);
-			}
-			return $meta;
-		}
-		$to = $meta['id'];
-		$type = 'Follow';
-		$inbox = self::get_inbox_by_actor( $to, $type );
-		if ( is_wp_error( $inbox ) ) {
-			return $inbox;
-		}
-
-		$activity = new \Activitypub\Activity\Activity();
-		$activity->set_type( 'Undo' );
-		$activity->set_to( null );
-		$activity->set_cc( null );
-		$activity->set_actor( $actor );
-		$activity->set_object(
-			array(
-				'type'   => $type,
-				'actor'  => $actor->get_url(),
-				'object' => $to,
-				'id'     => $to,
-			)
-		);
-		$activity->set_id( $actor . '#unfollow-' . \preg_replace( '~^https?://~', '', $to ) );
-		$activity = $activity->to_json();
-		$response = \Activitypub\safe_remote_post( $inbox, $activity, $user_id );
-
-		$user_feed = User_Feed::get_by_url( $url );
-		if ( $user_feed instanceof User_Feed ) {
-			$user_feed->update_last_log(
-				sprintf(
-				// translators: %s is the response from the remote server.
-					__( 'Sent unfollow request with response: %s', 'friends' ),
-					wp_remote_retrieve_response_code( $response ) . ' ' . wp_remote_retrieve_response_message( $response )
-				)
-			);
-		}
-	}
-
-	public static function get_possible_mentions() {
-		static $users = null;
-		if ( ! method_exists( '\Friends\User_Feed', 'get_by_parser' ) ) {
-			return array();
-		}
-
-		if ( is_null( $users ) || ! apply_filters( 'activitypub_cache_possible_friend_mentions', true ) ) {
-			$feeds = User_Feed::get_by_parser( 'activitypub' );
-			$users = array();
-			foreach ( $feeds as $feed ) {
-				$user = $feed->get_friend_user();
-				if ( ! $user ) {
-					continue;
-				}
-				$slug = $user->user_nicename;
-				if ( ! $slug ) {
-					$slug = $user->user_login;
-				}
-				$slug = sanitize_title( $slug );
-				if ( ! isset( $users[ '@' . $slug ] ) ) {
-					$users[ '@' . $slug ] = $feed->get_url();
-				}
-				$mastodon_handle = self::convert_actor_to_mastodon_handle( $feed->get_url() );
-				if ( $mastodon_handle && $mastodon_handle !== $feed->get_url() ) {
-					$users[ '@' . $mastodon_handle ] = $feed->get_url();
-				}
-			}
-
-			$local_users = get_users(
-				array(
-					'fields' => array( 'ID', 'user_nicename', 'user_login' ),
-				)
-			);
-			foreach ( $local_users as $local_user ) {
-				$slug = $local_user->user_nicename;
-				if ( ! $slug ) {
-					$slug = $local_user->user_login;
-				}
-				$slug = sanitize_title( $slug );
-				if ( ! isset( $users[ '@' . $slug ] ) ) {
-					$users[ '@' . $slug ] = get_author_posts_url( $local_user->ID, $local_user->user_nicename );
-				}
-			}
-			$users[ '@' . sanitize_title( get_bloginfo( 'name' ) ) ] = get_bloginfo( 'url' );
-		}
-
-		// Sort by length of key descending.
-		uksort(
-			$users,
-			function ( $a, $b ) {
-				return strlen( $b ) - strlen( $a );
-			}
-		);
-
-		return $users;
 	}
 
 	/**
@@ -1847,17 +2324,109 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	 * @return mixed The discovered mentions.
 	 */
 	public function activitypub_extract_mentions( $mentions, $post_content ) {
-		$users = self::get_possible_mentions();
+		// Find all @mentions in the content.
+		if ( ! preg_match_all( '/@([a-zA-Z0-9_.-]+(?:@[a-zA-Z0-9.-]+)?)\b/i', wp_strip_all_tags( $post_content ), $matches ) ) {
+			return $mentions;
+		}
 
-		// Check if a user is mentioned in the $post_content.
-		$matches = array();
-		foreach ( $users as $user => $url ) {
-			if ( strpos( $post_content, $user ) !== false ) {
-				$mentions[ $user ] = $users[ $user ];
+		foreach ( array_unique( $matches[1] ) as $handle ) {
+			$url = $this->resolve_mention_to_url( $handle );
+			if ( $url ) {
+				$mentions[ '@' . $handle ] = $url;
 			}
 		}
 
 		return $mentions;
+	}
+
+	/**
+	 * Resolve a mention handle to an ActivityPub URL.
+	 *
+	 * @param string $handle The handle (e.g., "bob" or "bob@mastodon.social").
+	 * @return string|null The ActivityPub URL or null if not found.
+	 */
+	private function resolve_mention_to_url( $handle ) {
+		// Check if it's a full handle like user@domain.
+		if ( strpos( $handle, '@' ) !== false ) {
+			return $this->resolve_full_handle( $handle );
+		}
+
+		$sanitized_handle = sanitize_title( $handle );
+
+		// Check Friends/Subscriptions first (they take precedence for outgoing mentions).
+		$url = $this->resolve_friend_by_slug( $sanitized_handle );
+		if ( $url ) {
+			return $url;
+		}
+
+		// Check local users.
+		$local_user = get_user_by( 'slug', $sanitized_handle );
+		if ( ! $local_user ) {
+			$local_user = get_user_by( 'login', $handle );
+		}
+		if ( $local_user ) {
+			if ( function_exists( '\Activitypub\get_rest_url_by_path' ) ) {
+				return \Activitypub\get_rest_url_by_path( 'actors/' . $local_user->ID );
+			}
+			return get_author_posts_url( $local_user->ID, $local_user->user_nicename );
+		}
+
+		// Check if it's the blog name.
+		if ( sanitize_title( get_bloginfo( 'name' ) ) === $sanitized_handle ) {
+			if ( function_exists( '\Activitypub\get_rest_url_by_path' ) ) {
+				return \Activitypub\get_rest_url_by_path( 'actors/0' );
+			}
+			return get_bloginfo( 'url' );
+		}
+
+		return null;
+	}
+
+	/**
+	 * Find a friend's ActivityPub URL by their sanitized slug.
+	 *
+	 * @param string $slug The sanitized slug to search for.
+	 * @return string|null The ActivityPub URL or null if not found.
+	 */
+	private function resolve_friend_by_slug( $slug ) {
+		$feeds = User_Feed::get_by_parser( 'activitypub' );
+		foreach ( $feeds as $feed ) {
+			$user = $feed->get_friend_user();
+			if ( ! $user ) {
+				continue;
+			}
+
+			$user_slug = $user->user_nicename;
+			if ( ! $user_slug ) {
+				$user_slug = $user->user_login;
+			}
+
+			if ( sanitize_title( $user_slug ) === $slug ) {
+				return $feed->get_url();
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Resolve a full Mastodon handle to an ActivityPub URL.
+	 *
+	 * @param string $handle The full handle (e.g., "bob@mastodon.social").
+	 * @return string|null The ActivityPub URL or null if not found.
+	 */
+	private function resolve_full_handle( $handle ) {
+		if ( ! class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			return null;
+		}
+
+		$actor = \Activitypub\Collection\Remote_Actors::fetch_by_acct( $handle );
+
+		if ( ! is_wp_error( $actor ) ) {
+			return $actor->guid;
+		}
+
+		return null;
 	}
 
 	/**
@@ -1975,7 +2544,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				return false;
 			}
 			$this->log( 'Received response', compact( 'url', 'object' ) );
-			$item = $this->handle_incoming_create( $object );
+			$item = $this->handle_incoming_create( $object, array(), array() );
 			if ( $item instanceof Feed_Item ) {
 				$new_posts = $this->friends_feed->process_incoming_feed_items( array( $item ), $user_feed );
 				if ( 1 === count( $new_posts ) ) {
@@ -1998,8 +2567,26 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		return $post_id;
 	}
 
+	/**
+	 * Resolve a URL to a Friends post ID for ActivityPub comment handling.
+	 *
+	 * This allows the ActivityPub plugin to create comments on friend_post_cache posts
+	 * instead of the Friends plugin creating new posts for replies.
+	 *
+	 * @param int    $post_id  The post ID (0 if not found).
+	 * @param string $url      The target URL being resolved.
+	 * @param array  $activity The activity object.
+	 * @return int The post ID.
+	 */
+	public function activitypub_comment_post_id( $post_id, $url, $activity ) {
+		if ( ! $post_id ) {
+			$post_id = \Friends\Feed::url_to_postid( $url );
+		}
+		return $post_id;
+	}
+
 	public function the_content( $the_content ) {
-		if ( ! Friends::on_frontend() ) {
+		if ( ! Friends::on_frontend() || ! class_exists( '\WP_HTML_Tag_Processor' ) ) {
 			return $the_content;
 		}
 
@@ -2092,38 +2679,16 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			! $friend_user->get_user_option( 'activitypub_friends_show_replies' )
 		) {
 			$plain_text_content = \wp_strip_all_tags( $item->post_content );
-			$possible_mentions = self::get_possible_mentions();
 
-			$no_known_user_found = true;
-			if ( preg_match( '/^@(?:[a-zA-Z0-9_.-]+)/i', $plain_text_content, $m ) ) {
-				if ( isset( $possible_mentions[ $m[0] ] ) ) {
-					$no_known_user_found = false;
-				}
-			} else {
-				// There are no mentions, so leave this post through.
+			// Check if post starts with a mention (it's a reply).
+			if ( ! preg_match( '/^@[a-zA-Z0-9_.-]+/', $plain_text_content ) ) {
+				// Not a reply, let it through.
 				return $item;
 			}
 
-			if ( $no_known_user_found ) {
-				if ( $friend_user && false !== strpos( $item->post_content, \get_author_posts_url( $friend_user->ID, $friend_user->user_nicename ) ) ) {
-					$no_known_user_found = false;
-				}
-			}
-
-			if ( $no_known_user_found ) {
-				foreach ( $possible_mentions as $username => $mention_url ) {
-					if ( false !== strpos( $item->post_content, $mention_url ) ) {
-						$no_known_user_found = false;
-						break;
-					}
-					if ( false !== strpos( $item->post_content, $username ) ) {
-						$no_known_user_found = false;
-						break;
-					}
-				}
-			}
-
-			if ( $no_known_user_found ) {
+			// Check if any mentioned actor is known.
+			$mention_urls = $item->_mention_urls ?? array();
+			if ( ! $this->has_known_mention( $mention_urls, $friend_user ) ) {
 				$item->_feed_rule_transform = array(
 					'post_status' => 'trash',
 				);
@@ -2133,19 +2698,99 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		return $item;
 	}
 
+	/**
+	 * Check if any mention URL is a known actor.
+	 *
+	 * @param array $mention_urls The mention URLs from the activity.
+	 * @param User  $friend_user  The friend user.
+	 * @return bool True if any mention is known.
+	 */
+	private function has_known_mention( array $mention_urls, User $friend_user ) {
+		foreach ( $mention_urls as $mention_url ) {
+			// Check if it's a local user.
+			if ( $this->is_local_actor_url( $mention_url ) ) {
+				return true;
+			}
+
+			// Check Friends user feeds.
+			$user_feed = $this->friends_feed->get_user_feed_by_url( $mention_url );
+			if ( $user_feed && ! is_wp_error( $user_feed ) ) {
+				return true;
+			}
+
+			// Check ActivityPub Remote_Actors.
+			if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+				$remote_actor = \Activitypub\Collection\Remote_Actors::get_by_uri( $mention_url );
+				if ( ! is_wp_error( $remote_actor ) ) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Check if a URL is a local actor (local WordPress user or blog).
+	 *
+	 * @param string $url The URL to check.
+	 * @return bool True if it's a local actor.
+	 */
+	private function is_local_actor_url( $url ) {
+		$site_url = get_bloginfo( 'url' );
+
+		// Must be on this site.
+		if ( strpos( $url, $site_url ) !== 0 ) {
+			return false;
+		}
+
+		// Check if it matches the blog actor.
+		if ( function_exists( '\Activitypub\get_rest_url_by_path' ) ) {
+			$blog_actor = \Activitypub\get_rest_url_by_path( 'actors/0' );
+			if ( $url === $blog_actor ) {
+				return true;
+			}
+		}
+
+		// Check local users.
+		$local_users = get_users( array( 'fields' => array( 'ID' ) ) );
+		foreach ( $local_users as $local_user ) {
+			if ( function_exists( '\Activitypub\get_rest_url_by_path' ) ) {
+				$actor_url = \Activitypub\get_rest_url_by_path( 'actors/' . $local_user->ID );
+				if ( $url === $actor_url ) {
+					return true;
+				}
+			}
+			// Also check author posts URL.
+			if ( get_author_posts_url( $local_user->ID ) === $url ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	public function friends_potential_avatars( $avatars, User $friend_user ) {
-		foreach ( $friend_user->get_feeds() as $user_feed ) {
+		foreach ( $friend_user->get_active_feeds() as $user_feed ) {
 			if ( 'activitypub' === $user_feed->get_parser() ) {
-				$details = $this->update_feed_details(
-					array(
-						'url' => $user_feed->get_url(),
-					)
-				);
-				if ( isset( $details['avatar'] ) ) {
-					$avatars[ $details['avatar'] ] = sprintf(
+				// Try to get avatar from locally cached ap_actor data to avoid network requests.
+				$ap_actor_id = $user_feed->get_ap_actor_id();
+				$avatar_url = null;
+				$title = $user_feed->get_title();
+
+				if ( $ap_actor_id && class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+					$avatar_url = \Activitypub\Collection\Remote_Actors::get_avatar_url( $ap_actor_id );
+					$actor_post = get_post( $ap_actor_id );
+					if ( $actor_post && $actor_post->post_title ) {
+						$title = $actor_post->post_title;
+					}
+				}
+
+				if ( $avatar_url ) {
+					$avatars[ $avatar_url ] = sprintf(
 						// translators: %s is a username.
 						__( 'Avatar of %s', 'friends' ),
-						$details['title']
+						$title
 					);
 				}
 			}
@@ -2160,8 +2805,9 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 
 		$meta = get_post_meta( $post->ID, self::SLUG, true );
-		if ( isset( $meta['attributedTo']['id'] ) ) {
-			return $meta['attributedTo']['id'];
+		$attributed_to_url = isset( $meta['attributedTo'] ) ? self::get_actor_url_from_attributed_to( $meta['attributedTo'] ) : null;
+		if ( $attributed_to_url ) {
+			return $attributed_to_url;
 		}
 
 		$feed_url = get_post_meta( $post->ID, 'feed_url', true );
@@ -2916,26 +3562,23 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			return;
 		}
 
-		if ( ! isset( $meta['attributedTo']['id'] ) ) {
+		if ( ! isset( $meta['attributedTo'] ) ) {
 			return;
 		}
 
-		if ( empty( $meta['attributedTo']['summary'] ) ) {
-			$meta['attributedTo']['summary'] = '';
-		}
-
-		if ( empty( $meta['attributedTo']['name'] ) ) {
-			$meta['attributedTo']['name'] = '';
+		$actor_metadata = self::get_actor_metadata_from_attributed_to( $meta['attributedTo'] );
+		if ( ! $actor_metadata['url'] ) {
+			return;
 		}
 
 		Friends::template_loader()->get_template_part(
 			'frontend/parts/activitypub/follow-link',
 			null,
 			array(
-				'url'     => $meta['attributedTo']['id'],
-				'name'    => $meta['attributedTo']['name'],
-				'handle'  => self::convert_actor_to_mastodon_handle( $meta['attributedTo']['id'] ),
-				'summary' => wp_strip_all_tags( $meta['attributedTo']['summary'] ),
+				'url'     => $actor_metadata['url'],
+				'name'    => $actor_metadata['name'],
+				'handle'  => self::convert_actor_to_mastodon_handle( $actor_metadata['url'] ),
+				'summary' => wp_strip_all_tags( $actor_metadata['summary'] ),
 			)
 		);
 	}
@@ -2963,13 +3606,30 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		$post = get_post( $post_id );
 		$mentions = self::extract_html_mentions( $post->post_content );
 		$meta = get_post_meta( $post->ID, self::SLUG, true );
-		if ( isset( $meta['attributedTo']['id'] ) && $meta['attributedTo']['id'] ) {
-			$mentions[ $meta['attributedTo']['id'] ] = $meta['attributedTo']['id'];
+		$attributed_to_url = isset( $meta['attributedTo'] ) ? self::get_actor_url_from_attributed_to( $meta['attributedTo'] ) : null;
+		if ( $attributed_to_url ) {
+			$mentions[ $attributed_to_url ] = $attributed_to_url;
+		}
+
+		// Exclude the current user's own actor URL from mentions.
+		$current_user_actor_url = null;
+		if ( is_user_logged_in() && class_exists( '\Activitypub\Collection\Actors' ) ) {
+			$actor_id = self::get_activitypub_actor_id( get_current_user_id() );
+			$actor = \Activitypub\Collection\Actors::get_by_id( $actor_id );
+			if ( $actor && ! is_wp_error( $actor ) ) {
+				$current_user_actor_url = $actor->get_id();
+			}
+		}
+		if ( $current_user_actor_url ) {
+			unset( $mentions[ $current_user_actor_url ] );
 		}
 
 		$comment_content = '';
 		if ( $mentions ) {
-			$comment_content = '@' . implode( ' @', array_map( array( self::class, 'convert_actor_to_mastodon_handle' ), array_keys( $mentions ) ) ) . ' ';
+			$handles = array_filter( array_map( array( self::class, 'convert_actor_to_mastodon_handle' ), array_keys( $mentions ) ) );
+			if ( $handles ) {
+				$comment_content = '@' . implode( ' @', $handles ) . ' ';
+			}
 		}
 		$html5 = current_theme_supports( 'html5', 'comment-form' ) ? 'html5' : 'xhtml';
 		$required_attribute = ( $html5 ? ' required' : ' required="required"' );
@@ -3023,40 +3683,102 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			return $location;
 		}
 		$post = get_post( $comment->comment_post_ID );
+		if ( ! $post || ! in_array( $post->post_type, apply_filters( 'friends_frontend_post_types', array() ), true ) ) {
+			// Only redirect for friend posts.
+			return $location;
+		}
 		$user = User::get_post_author( $post );
 
-		return $user->get_local_friends_page_url( $post->ID );
+		return $user->get_local_friends_page_url( $post->ID ) . '#comment-' . $comment->comment_ID;
 	}
 
-	private static function convert_actor_to_mastodon_handle( $actor ) {
-		$data = \Activitypub\Webfinger::get_data( $actor );
-		if ( ! is_wp_error( $data ) && isset( $data['subject'] ) ) {
-			$subject = $data['subject'];
-			if ( 'acct:' === substr( $data['subject'], 0, 5 ) ) {
-				$subject = substr( $data['subject'], 5 );
-			} elseif ( isset( $data['aliases'] ) ) {
-				foreach ( $data['aliases'] as $alias ) {
-					if ( 'acct:' === substr( $alias, 0, 5 ) ) {
-						$subject = substr( $alias, 5 );
-						break;
+	/**
+	 * Check if a host is a known ActivityPub instance.
+	 *
+	 * Loads all ap_actor guids and activitypub user feed URLs once per request
+	 * and extracts their hosts. Use the friends_is_known_activitypub_host filter
+	 * to register additional known hosts or patterns.
+	 *
+	 * @param string $host The hostname to check.
+	 * @return bool Whether the host is known.
+	 */
+	private static function is_known_activitypub_host( $host ) {
+		static $known_hosts = null;
+
+		if ( null === $known_hosts ) {
+			$known_hosts = array();
+			if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+				global $wpdb;
+				// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$guids = $wpdb->get_col(
+					$wpdb->prepare(
+						"SELECT guid FROM $wpdb->posts WHERE post_type = %s",
+						'ap_actor'
+					)
+				);
+				foreach ( $guids as $guid ) {
+					$guid_host = wp_parse_url( $guid, PHP_URL_HOST );
+					if ( $guid_host ) {
+						$known_hosts[ $guid_host ] = true;
 					}
 				}
 			}
-			return $subject;
-		}
-		// Construct from the URL as fallback.
-		$p = wp_parse_url( $actor );
-		if ( $p ) {
-			if ( isset( $p['host'] ) ) {
-				$domain = $p['host'];
+
+			// Also collect hosts from activitypub user feeds we follow.
+			$term_query = new \WP_Term_Query(
+				array(
+					'taxonomy'   => User_Feed::TAXONOMY,
+					'hide_empty' => false,
+					'meta_query' => array( // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_query
+						array(
+							'key'   => 'parser',
+							'value' => self::SLUG,
+						),
+					),
+				)
+			);
+			foreach ( $term_query->get_terms() as $term ) {
+				$feed_host = wp_parse_url( $term->slug, PHP_URL_HOST );
+				if ( $feed_host ) {
+					$known_hosts[ $feed_host ] = true;
+				}
 			}
-			if ( isset( $p['path'] ) ) {
-				$path_parts = explode( '/', trim( $p['path'], '/' ) );
-				$username = ltrim( array_pop( $path_parts ), '@' );
-			}
-			return $username . '@' . $domain;
 		}
 
+		if ( isset( $known_hosts[ $host ] ) ) {
+			return true;
+		}
+
+		return (bool) apply_filters( 'friends_is_known_activitypub_host', false, $host );
+	}
+
+	private static function convert_actor_to_mastodon_handle( $actor ) {
+		static $cache = array();
+		if ( isset( $cache[ $actor ] ) ) {
+			return $cache[ $actor ];
+		}
+
+		$p = wp_parse_url( $actor );
+		if ( $p && ! empty( $p['host'] ) && ! empty( $p['path'] ) ) {
+			$host       = $p['host'];
+			$path_parts = explode( '/', trim( $p['path'], '/' ) );
+			$username   = null;
+
+			if ( 1 === count( $path_parts ) && str_starts_with( $path_parts[0], '@' ) ) {
+				// /@username — ActivityPub-specific, safe on any domain.
+				$username = ltrim( $path_parts[0], '@' );
+			} elseif ( 2 === count( $path_parts ) && self::is_known_activitypub_host( $host ) ) {
+				// /users/username, /activitypub/username, etc. on known fediverse hosts.
+				$username = $path_parts[1];
+			}
+
+			if ( $username ) {
+				$cache[ $actor ] = $username . '@' . $host;
+				return $cache[ $actor ];
+			}
+		}
+
+		$cache[ $actor ] = $actor;
 		return $actor;
 	}
 

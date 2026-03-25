@@ -43,11 +43,19 @@ $override_author_name = apply_filters( 'friends_override_author_name', '', $auth
  * }, 10, 3 );
  * ```
  */
-+ 45
+
+/**
+ * Allows modifying the author URL for a post.
+ *
+ * @param string $author_url The author URL.
+ * @param User   $friend_user The friend user if any.
+ * @param int    $post_id The post ID.
+ */
+$author_url = apply_filters( 'friends_author_url', $friend_user->get_local_friends_page_url(), $friend_user, get_the_id() );
 ?><header class="entry-header card-header columns">
 	<div class="avatar col-auto mr-2 translator-exclude">
 		<?php if ( in_array( get_post_type(), apply_filters( 'friends_frontend_post_types', array() ), true ) ) : ?>
-			<a href="<?php echo esc_attr( $friend_user->get_local_friends_page_url() ); ?>" class="author-avatar">
+			<a href="<?php echo esc_attr( $author_url ); ?>" class="author-avatar">
 				<?php echo get_avatar( $args['friend_user']->ID, 36 ); ?>
 			</a>
 		<?php else : ?>
@@ -59,13 +67,24 @@ $override_author_name = apply_filters( 'friends_override_author_name', '', $auth
 	<div class="post-meta translator-exclude">
 		<div class="author">
 			<?php if ( in_array( get_post_type(), apply_filters( 'friends_frontend_post_types', array() ), true ) ) : ?>
-				<a href="<?php echo esc_attr( $friend_user->get_local_friends_page_url() ); ?>">
-					<strong><?php echo esc_html( $friend_user->display_name ); ?></strong>
-					<?php if ( $override_author_name && trim( str_replace( $override_author_name, '', $author_name ) ) === $author_name ) : ?>
-						– <?php echo esc_html( $override_author_name ); ?>
+				<a href="<?php echo esc_attr( $author_url ); ?>">
+					<?php
+					// If there's an override author that differs from the friend's display name,
+					// and it's not already part of the display name, show only the override name.
+					// Only apply this for the External user - for regular subscriptions, always use friend_user display name.
+					$is_external_user = 'external' === $friend_user->user_login;
+					$names_differ     = $is_external_user && $override_author_name && trim( str_replace( $override_author_name, '', $author_name ) ) === $author_name;
+					if ( $names_differ ) :
+						?>
+						<strong><?php echo esc_html( $override_author_name ); ?></strong>
+					<?php else : ?>
+						<strong><?php echo esc_html( $friend_user->display_name ); ?></strong>
 					<?php endif; ?>
 				</a>
 				<?php do_action( 'friends_post_author_meta', $friend_user ); ?>
+				<?php if ( get_post_meta( get_the_ID(), '_has_mention_in_comments', true ) ) : ?>
+					<span class="mention-indicator" title="<?php esc_attr_e( 'You were mentioned in a comment', 'friends' ); ?>">@</span>
+				<?php endif; ?>
 			<?php else : ?>
 				<a href="<?php echo esc_url( get_author_posts_url( get_the_author_meta( 'ID' ) ) ); ?>">
 					<strong><?php the_author(); ?></strong>

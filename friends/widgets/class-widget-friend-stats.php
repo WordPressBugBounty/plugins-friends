@@ -37,9 +37,6 @@ class Widget_Friend_Stats extends \WP_Widget {
 	 * @param array $instance Widget instance settings.
 	 */
 	public function widget( $args, $instance ) {
-		$friends = User_Query::all_friends();
-		$friends_count = $friends->get_total();
-
 		$subscriptions = User_Query::all_subscriptions();
 		$subscriptions_count = $subscriptions->get_total();
 
@@ -49,22 +46,29 @@ class Widget_Friend_Stats extends \WP_Widget {
 		$instance = wp_parse_args( $instance, $this->defaults() );
 		$show_followers = false;
 		$show_blog_followers = false;
-		if ( class_exists( '\ActivityPub\Collection\Followers' ) ) {
-			$activitypub_actor_mode = \get_option( 'activitypub_actor_mode', ACTIVITYPUB_ACTOR_MODE );
-			if ( ACTIVITYPUB_ACTOR_MODE === $activitypub_actor_mode || ACTIVITYPUB_ACTOR_AND_BLOG_MODE === $activitypub_actor_mode ) {
-				$follower_count = \ActivityPub\Collection\Followers::count_followers( get_current_user_id() );
+		if ( class_exists( '\ActivityPub\Collection\Followers' ) && \defined( 'ACTIVITYPUB_ACTOR_MODE' ) ) {
+			$activitypub_actor_mode = \get_option( 'activitypub_actor_mode', \ACTIVITYPUB_ACTOR_MODE );
+			if ( \ACTIVITYPUB_ACTOR_MODE === $activitypub_actor_mode || \ACTIVITYPUB_ACTOR_AND_BLOG_MODE === $activitypub_actor_mode ) {
+				$follower_count = Feed_Parser_ActivityPub::count_followers( get_current_user_id() );
 				$show_followers = true;
 			}
-			if ( ACTIVITYPUB_BLOG_MODE === $activitypub_actor_mode || ACTIVITYPUB_ACTOR_AND_BLOG_MODE === $activitypub_actor_mode ) {
-				$blog_follower_count = \ActivityPub\Collection\Followers::count_followers( \ActivityPub\Collection\Actors::BLOG_USER_ID );
-				$show_blog_followers = true;
+			if ( \ACTIVITYPUB_BLOG_MODE === $activitypub_actor_mode || \ACTIVITYPUB_ACTOR_AND_BLOG_MODE === $activitypub_actor_mode ) {
+				if ( class_exists( '\ActivityPub\Collection\Actors' ) ) {
+					$blog_follower_count = Feed_Parser_ActivityPub::count_followers( \ActivityPub\Collection\Actors::BLOG_USER_ID );
+					$show_blog_followers = true;
+				}
 			}
 		}
 		echo $args['before_widget'];
 
-		$open = Frontend::get_widget_open_state( $args['widget_id'] );
+		$open = true;
+		$widget_id = '';
+		if ( ! empty( $args['widget_id'] ) ) {
+			$widget_id = $args['widget_id'];
+			$open = Frontend::get_widget_open_state( $widget_id );
+		}
 		?>
-		<details class="accordion" <?php echo esc_attr( $open ); ?> data-id="<?php echo esc_attr( $args['widget_id'] ); ?>" data-nonce="<?php echo esc_attr( wp_create_nonce( 'friends_widget_state' ) ); ?>">
+		<details class="accordion" <?php echo esc_attr( $open ); ?> data-id="<?php echo esc_attr( $widget_id ); ?>" data-nonce="<?php echo esc_attr( wp_create_nonce( 'friends_widget_state' ) ); ?>">
 			<summary class="accordion-header">
 		<?php
 		echo $args['before_title'];
@@ -113,22 +117,9 @@ class Widget_Friend_Stats extends \WP_Widget {
 					</a>
 				</li>
 				<?php endif; ?>
-				<li class="friend-stats-friends menu-item">
-					<a href="<?php echo esc_attr( admin_url( 'admin.php?page=friends-list' ) ); ?>">
-						<?php
-						echo wp_kses(
-							sprintf(
-							/* translators: %s: number of friends */
-								_n( '%s Friend', '%s Friends', $friends_count, 'friends' ),
-								'<span class="friends">' . $friends_count . '</span>'
-							),
-							array( 'span' => array( 'class' => true ) )
-						);
-						?>
-					</a>
-				</li>
+
 				<li class="friend-stats-subscriptions menu-item">
-					<a href="<?php echo esc_attr( admin_url( 'admin.php?page=friends-list' ) ); ?>">
+					<a href="<?php echo esc_attr( home_url( '/friends/subscriptions/' ) ); ?>">
 						<?php
 							echo wp_kses(
 								sprintf(
@@ -143,6 +134,7 @@ class Widget_Friend_Stats extends \WP_Widget {
 				</li>
 
 		</ul>
+		</details>
 		<?php
 
 		do_action( 'friends_widget_starred_friend_list_after', $this, $args );

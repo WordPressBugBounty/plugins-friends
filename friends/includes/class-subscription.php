@@ -37,7 +37,7 @@ class Subscription extends User {
 		$this->term = $term;
 		$this->ID = 1e10 + $term->term_id;
 
-		$this->caps = array_fill_keys( get_metadata( 'term', $term->term_id, 'roles' ), true );
+		$this->caps = array_fill_keys( get_metadata( 'term', $term->term_id, 'roles', false ), true );
 		$this->caps['subscription'] = true;
 		$this->get_role_caps();
 
@@ -83,7 +83,7 @@ class Subscription extends User {
 				'singular_name' => _x( 'Virtual User', 'taxonomy singular name', 'friends' ),
 				'menu_name'     => __( 'Virtual User', 'friends' ),
 			),
-			'hierarchical'      => false,
+			'hierarchical'      => true,
 			'show_ui'           => true,
 			'show_admin_column' => true,
 			'query_var'         => true,
@@ -452,6 +452,95 @@ class Subscription extends User {
 		return _nx( 'Subscription', 'Subscriptions', $count, 'User role', 'friends' );
 	}
 
+	public function get_feeds() {
+		$term_query = new \WP_Term_Query(
+			array(
+				'taxonomy'   => User_Feed::TAXONOMY,
+				'parent'     => $this->get_term_id(),
+				'hide_empty' => false,
+			)
+		);
+
+		$feeds = array();
+		foreach ( $term_query->get_terms() as $term ) {
+			$feeds[ $term->term_id ] = new User_Feed( $term, $this );
+		}
+
+		return $feeds;
+	}
+
+	public function save_feeds( $feeds = array() ) {
+		$errors = new \WP_Error();
+		foreach ( $feeds as $feed_url => $options ) {
+			if ( ! is_string( $feed_url ) || ! Friends::check_url( $feed_url ) ) {
+				$errors->add( 'invalid-url', 'An invalid URL was provided', $feed_url );
+				unset( $feeds[ $feed_url ] );
+				continue;
+			}
+
+			$default_options = array(
+				'active'      => false,
+				'parser'      => 'simplepie',
+				'post-format' => 'standard',
+				'mime-type'   => 'application/rss+xml',
+				'title'       => $this->display_name . ' RSS Feed',
+			);
+
+			$feeds[ $feed_url ] = array_merge( $default_options, $options );
+		}
+
+		$subscription_term_id = $this->get_term_id();
+		$all_urls = array();
+		foreach ( get_terms(
+			array(
+				'taxonomy'   => User_Feed::TAXONOMY,
+				'parent'     => $subscription_term_id,
+				'hide_empty' => false,
+			)
+		) as $term ) {
+			$url = str_replace( '&amp;', '&', $term->name );
+			$all_urls[ $url ] = $term->term_id;
+		}
+
+		foreach ( $feeds as $url => $options ) {
+			if ( isset( $all_urls[ $url ] ) ) {
+				continue;
+			}
+			$result = wp_insert_term( $url, User_Feed::TAXONOMY, array( 'parent' => $subscription_term_id ) );
+			if ( is_wp_error( $result ) ) {
+				if ( 'term_exists' === $result->get_error_code() ) {
+					$existing_term_id = (int) $result->get_error_data();
+					wp_update_term( $existing_term_id, User_Feed::TAXONOMY, array( 'parent' => $subscription_term_id ) );
+					$all_urls[ $url ] = $existing_term_id;
+				}
+			} else {
+				$all_urls[ $url ] = $result['term_id'];
+			}
+		}
+
+		foreach ( $feeds as $url => $feed_options ) {
+			if ( ! isset( $all_urls[ $url ] ) ) {
+				continue;
+			}
+			$term_id = $all_urls[ $url ];
+			foreach ( $feed_options as $key => $value ) {
+				if ( in_array( $key, array( 'active', 'parser', 'post-format', 'mime-type', 'title', 'interval', 'modifier' ) ) ) {
+					if ( metadata_exists( 'term', $term_id, $key ) ) {
+						update_metadata( 'term', $term_id, $key, $value );
+					} else {
+						add_metadata( 'term', $term_id, $key, $value, true );
+					}
+				}
+			}
+		}
+
+		if ( $errors->has_errors() ) {
+			return $errors;
+		}
+
+		return $all_urls;
+	}
+
 	public function get_avatar_url() {
 		return get_metadata( 'term', $this->get_term_id(), 'avatar_url', true );
 	}
@@ -480,6 +569,94 @@ class Subscription extends User {
 
 		delete_metadata( 'term', $this->get_term_id(), 'starred' );
 		return false;
+	}
+
+	/**
+	 * Get the folder (parent term) this subscription belongs to.
+	 *
+	 * @return \WP_Term|null The folder term, or null if at root.
+	 */
+	public function get_folder() {
+		if ( $this->term->parent ) {
+			$parent = get_term( $this->term->parent, self::TAXONOMY );
+			if ( $parent && ! is_wp_error( $parent ) ) {
+				return $parent;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Move this subscription to a folder.
+	 *
+	 * @param int $folder_term_id The folder term ID, or 0 for root.
+	 * @return bool True on success.
+	 */
+	public function move_to_folder( $folder_term_id ) {
+		$result = wp_update_term(
+			$this->get_term_id(),
+			self::TAXONOMY,
+			array( 'parent' => $folder_term_id )
+		);
+		if ( ! is_wp_error( $result ) ) {
+			$this->term->parent = $folder_term_id;
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Create a folder in the subscription taxonomy.
+	 *
+	 * @param string $name      The folder name.
+	 * @param int    $parent_id Optional parent folder ID.
+	 * @return \WP_Term|\WP_Error The created folder term or error.
+	 */
+	public static function create_folder( $name, $parent_id = 0 ) {
+		$result = wp_insert_term(
+			$name,
+			self::TAXONOMY,
+			array(
+				'parent' => $parent_id,
+				'slug'   => sanitize_title( 'folder-' . $name ),
+			)
+		);
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+		$term = get_term( $result['term_id'], self::TAXONOMY );
+		update_term_meta( $term->term_id, 'is_folder', true );
+		return $term;
+	}
+
+	/**
+	 * Get all folders.
+	 *
+	 * @param int $parent_id Optional parent folder ID.
+	 * @return \WP_Term[] Array of folder terms.
+	 */
+	public static function get_folders( $parent_id = null ) {
+		$args = array(
+			'taxonomy'   => self::TAXONOMY,
+			'hide_empty' => false,
+			'meta_key'   => 'is_folder', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key
+			'meta_value' => '1', // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_value
+		);
+		if ( null !== $parent_id ) {
+			$args['parent'] = $parent_id;
+		}
+		$query = new \WP_Term_Query( $args );
+		return $query->get_terms();
+	}
+
+	/**
+	 * Check if a term is a folder.
+	 *
+	 * @param int $term_id The term ID.
+	 * @return bool
+	 */
+	public static function is_folder( $term_id ) {
+		return (bool) get_term_meta( $term_id, 'is_folder', true );
 	}
 
 	public function delete() {
@@ -513,40 +690,88 @@ class Subscription extends User {
 			return $subscription;
 		}
 
-		$query = new \WP_Query();
-		$query->set( 'post_type', apply_filters( 'friends_frontend_post_types', array() ) );
-		$query->set( 'post_status', array( 'publish', 'private', 'draft', 'trash' ) );
-		$query->set( 'posts_per_page', -1 );
-		$query = $user->modify_query_by_author( $query );
+		global $wpdb;
 
-		foreach ( $query->get_posts() as $post ) {
-			$post->post_author = 0;
-			wp_update_post( $post );
-			wp_set_object_terms( $post->ID, $subscription->get_term_id(), self::TAXONOMY );
+		// Get the term_taxonomy_id for the subscription term.
+		$subscription_tt_id = $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+			$wpdb->prepare(
+				"SELECT term_taxonomy_id FROM {$wpdb->term_taxonomy} WHERE term_id = %d AND taxonomy = %s",
+				$subscription->get_term_id(),
+				self::TAXONOMY
+			)
+		);
+
+		// Migrate posts: add subscription term and set post_author to 0, all in bulk.
+		$post_types = apply_filters( 'friends_frontend_post_types', array() );
+		if ( ! empty( $post_types ) ) {
+			$type_in = implode( ',', array_fill( 0, count( $post_types ), '%s' ) );
+
+			// Get affected post IDs for cache invalidation.
+			$affected_post_ids = $wpdb->get_col( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$wpdb->prepare(
+					"SELECT ID FROM {$wpdb->posts} WHERE post_author = %d AND post_type IN (" . $type_in . ')', // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+					array_merge( array( $user->ID ), $post_types )
+				)
+			);
+
+			// Add subscription term relationship for all posts by this user.
+			$wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$wpdb->prepare( // phpcs:ignore WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber
+					"INSERT IGNORE INTO {$wpdb->term_relationships} (object_id, term_taxonomy_id)
+					SELECT ID, %d FROM {$wpdb->posts} WHERE post_author = %d AND post_type IN (" . $type_in . ')', // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+					array_merge( array( $subscription_tt_id, $user->ID ), $post_types )
+				)
+			);
+
+			// Update post_author to 0 for all posts by this user.
+			$wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+				$wpdb->prepare(
+					"UPDATE {$wpdb->posts} SET post_author = 0 WHERE post_author = %d AND post_type IN (" . $type_in . ')', // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+					array_merge( array( $user->ID ), $post_types )
+				)
+			);
+
+			// Clean post caches after direct DB update.
+			foreach ( $affected_post_ids as $affected_post_id ) {
+				clean_post_cache( $affected_post_id );
+			}
+
+			// Update the term count.
+			wp_update_term_count_now( array( $subscription_tt_id ), self::TAXONOMY );
 		}
 
-		global $wpdb;
-		// Convert feeds.
+		// Convert feeds: set parent to the subscription term_id and remove the object relationship.
+		$feed_term_ids = wp_get_object_terms( $user->ID, User_Feed::TAXONOMY, array( 'fields' => 'ids' ) );
 		$wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 			$wpdb->prepare( // phpcs:ignore WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber
 				sprintf(
-					'UPDATE %s
-					JOIN %s
-					ON %s.term_taxonomy_id = %s.term_taxonomy_id
-					SET object_id = %%d
-					WHERE object_id = %%d
-					AND %s.taxonomy = %%s',
-					$wpdb->term_relationships,
+					'UPDATE %s tt
+					JOIN %s tr ON tt.term_taxonomy_id = tr.term_taxonomy_id
+					SET tt.parent = %%d
+					WHERE tr.object_id = %%d
+					AND tt.taxonomy = %%s',
 					$wpdb->term_taxonomy,
-					$wpdb->term_relationships,
-					$wpdb->term_taxonomy,
-					$wpdb->term_taxonomy
+					$wpdb->term_relationships
 				),
 				$subscription->get_term_id(),
 				$user->ID,
 				User_Feed::TAXONOMY
 			)
 		);
+		// Remove old object_id-based relationships so the delete_user hook won't find and delete these feeds.
+		// Use direct DB delete to avoid wp_remove_object_terms side effects (hook cascades, term count resets).
+		$wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
+			$wpdb->prepare(
+				"DELETE tr FROM {$wpdb->term_relationships} tr
+				JOIN {$wpdb->term_taxonomy} tt ON tr.term_taxonomy_id = tt.term_taxonomy_id
+				WHERE tr.object_id = %d AND tt.taxonomy = %s",
+				$user->ID,
+				User_Feed::TAXONOMY
+			)
+		);
+		if ( ! empty( $feed_term_ids ) && ! is_wp_error( $feed_term_ids ) ) {
+			clean_term_cache( $feed_term_ids, User_Feed::TAXONOMY );
+		}
 
 		foreach ( self::MIGRATE_USER_OPTIONS as $option_name ) {
 			$subscription->update_user_option( $option_name, $user->get_user_option( $option_name ) );
@@ -555,57 +780,6 @@ class Subscription extends User {
 		$user->delete();
 
 		return $subscription;
-	}
-
-	public static function convert_to_user( Subscription $subscription ) {
-		$user = User::create( $subscription->user_login, $subscription->roles[0], $subscription->user_url, $subscription->display_name, $subscription->get_avatar_url(), $subscription->description, $subscription->user_registered, true );
-
-		if ( is_wp_error( $user ) ) {
-			return $user;
-		}
-
-		$query = new \WP_Query();
-		$query->set( 'post_type', apply_filters( 'friends_frontend_post_types', array() ) );
-		$query->set( 'post_status', array( 'publish', 'private', 'draft', 'trashed' ) );
-		$query->set( 'posts_per_page', -1 );
-		$query = $subscription->modify_query_by_author( $query );
-
-		foreach ( $query->get_posts() as $post ) {
-			$post->post_author = $user->ID;
-			wp_update_post( $post );
-			wp_remove_object_terms( $post->ID, $subscription->get_term_id(), self::TAXONOMY );
-		}
-
-		global $wpdb;
-		// Convert feeds.
-		$wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
-			$wpdb->prepare( // phpcs:ignore WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber
-				sprintf(
-					'UPDATE %s
-					JOIN %s
-					ON %s.term_taxonomy_id = %s.term_taxonomy_id
-					SET object_id = %%d
-					WHERE object_id = %%d
-					AND %s.taxonomy = %%s',
-					$wpdb->term_relationships,
-					$wpdb->term_taxonomy,
-					$wpdb->term_relationships,
-					$wpdb->term_taxonomy,
-					$wpdb->term_taxonomy
-				),
-				$user->ID,
-				$subscription->get_term_id(),
-				User_Feed::TAXONOMY
-			)
-		);
-
-		foreach ( self::MIGRATE_USER_OPTIONS as $option_name ) {
-			$user->update_user_option( $option_name, $subscription->get_user_option( $option_name ) );
-		}
-
-		$subscription->delete();
-
-		return $user;
 	}
 
 	/**
@@ -618,11 +792,13 @@ class Subscription extends User {
 	 * @param      string $avatar_url      The user_icon_url URL.
 	 * @param      string $description   A description for the user.
 	 * @param      string $user_registered   When the user was registered.
-	 * @param      bool   $subscription_override  Whether to override the automatic creation of a subscription.
 	 *
 	 * @return     Subscription|\WP_Error  The created subscription or an error.
 	 */
-	public static function create( $user_login, $role, $user_url, $display_name = null, $avatar_url = null, $description = null, $user_registered = null, $subscription_override = false ) {
+	public static function create( $user_login, $role, $user_url, $display_name = null, $avatar_url = null, $description = null, $user_registered = null ) {
+		// Sanitize the username to prevent special characters like apostrophes.
+		$user_login = User::sanitize_username( $user_login );
+
 		$term = term_exists( $user_login, self::TAXONOMY );
 
 		if ( ! $term || ! isset( $term['term_id'] ) ) {

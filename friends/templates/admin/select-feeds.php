@@ -1,6 +1,6 @@
 <?php
 /**
- * This template contains the Admin Send Friend Request form.
+ * This template contains the feed selection form for following someone.
  *
  * @package Friends
  */
@@ -8,10 +8,6 @@
 $c = -1;
 $hidden_feed_count = 0;
 $unsupported_feeds = array();
-$friends_host = false;
-if ( $args['friends_plugin'] ) {
-	$friends_host = wp_parse_url( $args['friends_plugin'], PHP_URL_HOST );
-}
 
 foreach ( $args['feeds'] as $feed_url => $details ) {
 	if ( ! isset( $details['parser'] ) || 'unsupported' === $details['parser'] ) {
@@ -32,7 +28,6 @@ foreach ( $args['feeds'] as $feed_url => $details ) {
 	<input type="hidden" name="friend_url" value="<?php echo esc_url( $args['friend_url'] ); ?>" />
 	<p>
 		<?php
-		// translators: %s is a URL.
 		echo wp_kses(
 			// translators: %1$s is a URL, %2$s is an admin link.
 			sprintf( __( 'You\'re looking to add the URL %1$s (<a href=%2$s>edit</a>). The site has been analyzed and you now have the following options:', 'friends' ), '<strong>' . esc_html( $args['friend_url'] ) . '</strong>', '"' . admin_url( 'admin.php?page=add-friend&url=' . $args['friend_url'] ) . '"' ),
@@ -52,6 +47,9 @@ foreach ( $args['feeds'] as $feed_url => $details ) {
 				<?php if ( ! empty( $args['friends_multisite_display_name'] ) ) : ?>
 					<?php echo esc_html( $args['friends_multisite_display_name'] ); ?>
 					<input type="hidden" id="display_name" name="display_name" value="<?php echo esc_attr( $args['friend_display_name'] ); ?>" />
+					<p class="description">
+						<?php esc_html_e( 'This user already exists on your WordPress network. Their display name cannot be changed here.', 'friends' ); ?>
+					</p>
 				<?php else : ?>
 					<input type="text" id="display_name" name="display_name" value="<?php echo esc_attr( $args['friend_display_name'] ); ?>" required placeholder="" class="regular-text" />
 				<?php endif; ?>
@@ -63,69 +61,16 @@ foreach ( $args['feeds'] as $feed_url => $details ) {
 					<?php if ( ! empty( $args['friends_multisite_user_login'] ) ) : ?>
 						<?php echo esc_html( $args['friends_multisite_user_login'] ); ?>
 						<input type="hidden" id="user_login" name="user_login" value="<?php echo esc_attr( $args['friends_multisite_user_login'] ); ?>" />
+						<p class="description">
+							<?php esc_html_e( 'This user already exists on your WordPress network. Their username cannot be changed here.', 'friends' ); ?>
+						</p>
 					<?php else : ?>
 						<input type="text" id="user_login" name="user_login" value="<?php echo esc_attr( $args['friend_user_login'] ); ?>" data-original="<?php echo esc_attr( $args['friend_user_login'] ); ?>" required placeholder="" class="regular-text" />
 					<?php endif; ?>
 				</td>
 			</tr>
-			<?php if ( $args['friends_plugin'] ) : ?>
 			<tr>
-				<th scope="row"><label for="friendship"><?php esc_html_e( 'Friendship', 'friends' ); ?></label></th>
-				<td  title="<?php echo esc_attr( $args['friends_plugin'] ); ?>">
-					<label><input type="checkbox" id="friendship" name="friendship" value="<?php echo esc_attr( $args['friends_plugin'] ); ?>" checked /> <?php esc_html_e( 'Send request for friendship', 'friends' ); ?></label> —
-					<label><?php esc_html_e( 'Their role will be:', 'friends' ); ?> <select name="role" id="friendship-status">
-						<?php
-						foreach ( $args['friend_roles'] as $_role => $_title ) :
-							?>
-							<option value="<?php echo esc_attr( $_role ); ?>"<?php selected( $args['default_role'], $_role ); ?>><?php echo esc_html( $_title ); ?></option>
-						<?php endforeach; ?>
-					</select></label>
-					<p class="description details hidden"><small>
-						<?php
-						// translators: %s is a URL.
-						echo esc_html( sprintf( __( 'API URL: %s', 'friends' ), $args['friends_plugin'] ) );
-						?>
-						</small>
-					</p>
-					<p class="description">
-						<?php esc_html_e( 'When the other side accepts your friend request, a trusted connection between your sites is established.', 'friends' ); ?>
-					</p>
-					<p><small><a href="" id="send-friends-advanced"><?php esc_html_e( 'Add optional information »', 'friends' ); ?></a></small></p>
-				</td>
-			</tr>
-			<tr class="friends-advanced hidden">
-				<th scope="row"><label for="message"><?php esc_html_e( 'Message (Optional)', 'friends' ); ?></label></th>
-				<td>
-					<input type="text" autofocus id="message" name="message" value="<?php echo esc_attr( $args['message'] ); ?>" placeholder="<?php esc_attr_e( 'Enter a message for your friend', 'friends' ); ?>" class="large-text" maxlength="2000" />
-					<p class="description" id="message-description">
-						<?php esc_html_e( 'The short message you supply will be sent along with your friend request.', 'friends' ); ?>
-					</p>
-				</td>
-			</tr>
-			<tr class="friends-advanced hidden">
-				<th scope="row"><label for="codeword"><?php esc_html_e( 'Code word (Optional)', 'friends' ); ?></label></th>
-				<td>
-					<input type="text" autofocus id="codeword" name="codeword" value="<?php echo esc_attr( $args['codeword'] ); ?>" placeholder="<?php /* phpcs:ignore WordPress.WP.I18n.MissingArgDomain */ esc_attr_e( 'None' ); ?>" class="regular-text" />
-					<p class="description" id="codeword-description">
-						<?php esc_html_e( 'Your friend might have told you to provide something here.', 'friends' ); ?>
-					</p>
-				</td>
-			</tr>
-			<?php elseif ( get_option( 'friends_enable_wp_friendships' ) ) : ?>
-			<tr>
-				<th scope="row"><label for="friendship"><?php esc_html_e( 'Friendship', 'friends' ); ?></label></th>
-				<td>
-					<p class="description">
-						<?php
-						// translators: %s is a URL.
-						echo wp_kses( sprintf( __( 'No friends plugin could be found on %s, therefore only subscription options are available.', 'friends' ), '<strong>' . esc_html( $args['friend_url'] ) . '</strong>' ), array( 'strong' => array() ) );
-						?>
-					</p>
-				</td>
-			</tr>
-		<?php endif; ?>
-			<tr>
-				<th scope="row"><?php esc_html_e( 'Subscription', 'friends' ); ?></th>
+				<th scope="row"><?php esc_html_e( 'Follow', 'friends' ); ?></th>
 				<td>
 					<?php if ( ! empty( $args['feeds_notice'] ) ) : ?>
 						<strong><?php echo wp_kses( $args['feeds_notice'], array( 'a' => array( 'href' => array() ) ) ); ?></strong>
@@ -333,7 +278,7 @@ foreach ( $args['feeds'] as $feed_url => $details ) {
 			<tr>
 				<th></th>
 				<td>
-					<input type="submit" class="button button-primary" name="step3" value="<?php echo esc_attr_x( 'Add Friend »', 'button', 'friends' ); ?>" />
+					<input type="submit" class="button button-primary" name="step3" value="<?php echo esc_attr_x( 'Follow »', 'button', 'friends' ); ?>" />
 				</td>
 			</tr>
 		</tbody>

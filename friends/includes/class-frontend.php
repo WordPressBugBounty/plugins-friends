@@ -564,7 +564,7 @@ class Frontend {
 				'content' => 'friends-followers',
 			),
 			'friends//friends-subscriptions' => array(
-				'title'   => __( 'Friends Subscriptions', 'friends' ),
+				'title'   => __( 'Friends Following', 'friends' ),
 				'content' => 'friends-subscriptions',
 			),
 			'friends//friends-single'        => array(
@@ -1071,6 +1071,11 @@ class Frontend {
 	 */
 	public static function have_posts() {
 		$friends = Friends::get_instance();
+		$known_author = $friends->frontend->author;
+		$known_avatar = null;
+		if ( $known_author instanceof User ) {
+			$known_avatar = $known_author->get_avatar_url();
+		}
 		while ( have_posts() ) {
 			global $post;
 			the_post();
@@ -1078,8 +1083,13 @@ class Frontend {
 				'friends' => $friends,
 			);
 
-			$args['friend_user'] = User::get_post_author( $post );
-			$args['avatar'] = $args['friend_user']->get_avatar_url();
+			if ( $known_author ) {
+				$args['friend_user'] = $known_author;
+				$args['avatar'] = $known_avatar;
+			} else {
+				$args['friend_user'] = User::get_post_author( $post );
+				$args['avatar'] = $args['friend_user']->get_avatar_url();
+			}
 
 			$read_time = self::calculate_read_time( get_the_content() );
 			if ( $read_time >= 60 ) {
@@ -1466,8 +1476,12 @@ class Frontend {
 
 		switch ( $path ) {
 			case 'subscriptions':
+				wp_safe_redirect( home_url( '/friends/following/' ) );
+				exit;
+
+			case 'following':
 				$friends_args = array();
-				$path = 'frontend/subscriptions';
+				$path         = 'frontend/subscriptions';
 				break;
 
 			case 'followers':
@@ -1501,6 +1515,17 @@ class Frontend {
 				}
 				$friends_args['user_id'] = \Activitypub\Collection\Actors::BLOG_USER_ID;
 				$path = 'frontend/followers';
+				break;
+			case 'mutual':
+				if ( ! class_exists( '\Activitypub\Collection\Followers' ) ) {
+					return 'frontend/index';
+				}
+
+				$friends_args            = array();
+				$friends_args['title']  = __( 'Friends', 'friends' );
+				$friends_args['filter'] = 'following';
+				$friends_args['user_id'] = get_current_user_id();
+				$path                    = 'frontend/followers';
 				break;
 
 			default:
@@ -1759,7 +1784,7 @@ class Frontend {
 		}
 
 		// translators: %s is a name.
-		$title = sprintf( __( "%s' Subscriptions", 'friends' ), $user->display_name );
+		$title = sprintf( __( '%s is following', 'friends' ), $user->display_name );
 		$filename = 'friends-';
 		if ( ! $only_public ) {
 			$title = __( 'My Friends', 'friends' );

@@ -61,6 +61,7 @@ class Admin {
 		add_action( 'wp_ajax_friends_dashboard', array( $this, 'ajax_friends_dashboard' ) );
 		add_filter( 'site_status_test_php_modules', array( $this, 'site_status_test_php_modules' ) );
 		add_filter( 'friends_create_and_follow', array( $this, 'create_and_follow' ), 10, 4 );
+		add_action( 'friends_edit_feed_content_top', array( $this, 'maybe_render_activitypub_inactive_notice' ), 10, 3 );
 
 		if ( ! get_option( 'permalink_structure' ) ) {
 			add_action( 'admin_notices', array( $this, 'admin_notice_unsupported_permalink_structure' ) );
@@ -119,6 +120,7 @@ class Admin {
 		// phpcs:ignore WordPress.WP.I18n.MissingArgDomain
 		add_submenu_page( 'friends', __( 'Home' ), __( 'Home' ), $required_role, 'friends', array( $this, 'render_admin_home' ) );
 		add_action( 'load-' . $page_type . '_page_friends-page', array( $this, 'redirect_to_friends_page' ) );
+		add_submenu_page( 'friends', __( 'Add Friend', 'friends' ), __( 'Add Friend', 'friends' ), $required_role, 'add-friend', array( $this, 'render_admin_add_friend' ) );
 		// phpcs:ignore WordPress.WP.I18n.MissingArgDomain
 		add_submenu_page( 'friends', __( 'Settings' ), __( 'Settings' ), $required_role, 'friends-settings', array( $this, 'render_admin_settings' ) );
 		if (
@@ -714,6 +716,490 @@ class Admin {
 		);
 
 		Friends::template_loader()->get_template_part( 'admin/settings-footer' );
+	}
+
+	/**
+	 * Process the response after adding a friend/subscription.
+	 *
+	 * @param User|\WP_Error $friend_user The friend user object.
+	 * @param array          $vars        The form variables.
+	 *
+	 * @return bool Whether the operation was successful.
+	 */
+	private function process_admin_add_friend_response( $friend_user, $vars ) {
+		if ( is_wp_error( $friend_user ) ) {
+			$this->display_errors( $friend_user );
+			return false;
+		}
+
+		if ( ! $friend_user instanceof User ) {
+			?>
+			<div id="message" class="updated notice is-dismissible"><p>
+				<?php esc_html_e( 'Unknown error', 'friends' ); ?>
+			</p></div>
+			<?php
+			return false;
+		}
+
+		$feed_options = array();
+		if ( ! isset( $vars['feeds'] ) ) {
+			$vars['feeds'] = array();
+		}
+		foreach ( $vars['feeds'] as $feed ) {
+			if ( isset( $feed['type'] ) ) {
+				$feed['mime-type'] = $feed['type'];
+				unset( $feed['type'] );
+			}
+			$feed_options[ $feed['url'] ] = $feed;
+		}
+
+		$friend_user->save_feeds( $feed_options );
+
+		if ( ! isset( $vars['subscribe'] ) ) {
+			$vars['subscribe'] = array();
+		}
+
+		$count = 0;
+		foreach ( $vars['subscribe'] as $feed_url ) {
+			if ( ! isset( $feed_options[ $feed_url ] ) ) {
+				continue;
+			}
+			$new_feed = $friend_user->subscribe( $feed_url, $feed_options[ $feed_url ] );
+			if ( ! is_wp_error( $new_feed ) ) {
+				do_action( 'friends_user_feed_activated', $new_feed );
+				++$count;
+			}
+		}
+
+		add_filter( 'notify_about_new_friend_post', '__return_false', 999 );
+		wp_schedule_single_event( time(), 'friends_retrieve_user_feeds', array( $friend_user->ID ) );
+
+		$friend_link = '<a href="' . esc_url( $this->admin_edit_user_link( $friend_user->get_local_friends_page_url(), $friend_user ) ) . '" target="_blank" rel="noopener noreferrer">' . esc_html( $friend_user->display_name ) . '</a>';
+
+		// translators: %s is a Site URL.
+		$message = sprintf( __( "You're now subscribed to %s.", 'friends' ), $friend_link );
+
+		?>
+		<div id="message" class="updated notice is-dismissible"><p>
+			<?php
+			echo wp_kses( $message, array( 'a' => array( 'href' => array() ) ) );
+			// translators: %s is the friends page URL.
+			echo ' ', wp_kses( sprintf( __( 'Go to your <a href=%s>friends page</a> to view their posts.', 'friends' ), '"' . esc_url( $friend_user->get_local_friends_page_url() ) . '"' ), array( 'a' => array( 'href' => array() ) ) );
+			echo ' <span id="fetch-feeds" data-nonce="', esc_attr( wp_create_nonce( 'fetch-feeds-' . sanitize_user( $friend_user->user_login ) ) ), '" data-friend=', esc_attr( $friend_user->user_login ), '>', esc_html__( 'Fetching feeds...', 'friends' ), '</span>';
+			?>
+		</p></div>
+		<?php
+		return true;
+	}
+
+	/**
+	 * Process the Add Friend form.
+	 *
+	 * @param array $vars The POST or GET variables.
+	 *
+	 * @return \WP_Error|null|bool A \WP_Error, null, or true on success.
+	 */
+	public function process_admin_add_friend( $vars ) {
+		$errors = new \WP_Error();
+
+		$friend_url = isset( $vars['friend_url'] ) ? trim( $vars['friend_url'] ) : '';
+
+		$friend_user = false;
+
+		$protocol = wp_parse_url( $friend_url, PHP_URL_SCHEME );
+		if ( ! $protocol ) {
+			if ( is_multisite() ) {
+				$friend_user = get_user_by( 'login', $friend_url );
+				if ( $friend_user ) {
+					$site = get_active_blog_for_user( $friend_user->ID );
+					$friend_url = set_url_scheme( $site->siteurl );
+				}
+			}
+
+			if ( ! $friend_user ) {
+				$friend_url = apply_filters( 'friends_rewrite_incoming_url', 'https://' . $friend_url, $friend_url );
+			}
+		}
+		$friend_user_login = apply_filters( 'friends_suggest_user_login', User::get_user_login_for_url( $friend_url ), $friend_url );
+		$friend_display_name = apply_filters( 'friends_suggest_display_name', User::get_display_name_for_url( $friend_url ), $friend_url );
+
+		$friend_user = get_user_by( 'login', $friend_user_login );
+
+		$args = array();
+		if ( $friend_user ) {
+			$args['friends_multisite_user_login'] = $friend_user_login;
+			$args['friends_multisite_display_name'] = $friend_display_name;
+		}
+
+		if ( ( isset( $vars['step2'] ) && isset( $vars['feeds'] ) && is_array( $vars['feeds'] ) ) || isset( $vars['step3'] ) ) {
+			$friend_user_login = trim( str_replace( ' ', '-', sanitize_user( $vars['user_login'] ) ), '-' );
+			$friend_display_name = sanitize_text_field( $vars['display_name'] );
+			if ( ! $friend_user_login ) {
+				// phpcs:ignore WordPress.WP.I18n.MissingArgDomain
+				$errors->add( 'user_login', __( '<strong>Error</strong>: This username is invalid because it uses illegal characters. Please enter a valid username.' ) );
+			} elseif ( ! is_multisite() && username_exists( $friend_user_login ) ) {
+				// phpcs:ignore WordPress.WP.I18n.MissingArgDomain
+				$errors->add( 'user_login', __( '<strong>Error</strong>: This username is already registered. Please choose another one.' ) );
+			}
+
+			$feeds = $vars['feeds'];
+			if ( ! $errors->has_errors() ) {
+				$avatar = null;
+				$description = null;
+				foreach ( $feeds as $feed_details ) {
+					if ( ! $avatar && ! empty( $feed_details['avatar'] ) ) {
+						$avatar = $feed_details['avatar'];
+					}
+					if ( ! $description && ! empty( $feed_details['description'] ) ) {
+						$description = wp_encode_emoji( $feed_details['description'] );
+					}
+				}
+
+				$friend_user = User::create( $friend_user_login, 'subscription', $friend_url, $friend_display_name, $avatar, $description );
+
+				return $this->process_admin_add_friend_response( $friend_user, $vars );
+			}
+		} else {
+			if ( str_starts_with( $friend_url, home_url() ) ) {
+				return new \WP_Error( 'friend-yourself', __( 'It seems like you sent a friend request to yourself.', 'friends' ) );
+			}
+
+			if ( preg_match( '#https://.*?@threads.net#', $friend_url ) ) {
+				return new \WP_Error(
+					'threads-net',
+					sprintf(
+						// translators: %s is a URL.
+						__( '⚠️ This user has <a href="%s">not enabled Fediverse sharing on their Threads.net account</a>.', 'friends' ),
+						'https://about.fb.com/news/2023/07/introducing-threads-new-app-text-sharing/'
+					)
+				);
+			}
+
+			if ( ! Friends::check_url( $friend_url ) ) {
+				return new \WP_Error( 'invalid-url', __( 'You entered an invalid URL.', 'friends' ) );
+			}
+
+			$friend_user = User::get_user( $friend_user_login );
+			if ( $friend_user && ! is_wp_error( $friend_user ) ) {
+				// translators: %s is the name of a friend / site.
+				return new \WP_Error( 'already-subscribed', sprintf( __( 'You are already subscribed to this site: %s', 'friends' ), '<a href="' . esc_url( $this->admin_edit_user_link( $friend_user->get_local_friends_page_url(), $friend_user ) ) . '">' . esc_html( $friend_user->display_name ) . '</a>' ) );
+			}
+
+			$feeds = $this->friends->feed->discover_available_feeds( $friend_url );
+			if ( is_wp_error( $feeds ) ) {
+				return $feeds;
+			}
+			if ( ! $feeds ) {
+				return new \WP_Error( 'no-feed-found', __( 'No suitable feed was found at the provided address.', 'friends' ) );
+			}
+			$has_subscribable_feeds = false;
+			$has_threads_net = false;
+			foreach ( $feeds as $url => $feed ) {
+				if ( 0 === strpos( $url, 'https://threads.net/' ) ) {
+					$has_threads_net = true;
+				}
+				if ( isset( $feed['autoselect'] ) && $feed['autoselect'] ) {
+					$has_subscribable_feeds = true;
+					break;
+				}
+				if ( 'unsupported' !== $feed['parser'] ) {
+					$has_subscribable_feeds = true;
+					break;
+				}
+			}
+
+			if ( ! $has_subscribable_feeds && $has_threads_net ) {
+				$args['feeds_notice'] = sprintf(
+					// translators: %s is a URL.
+					__( '⚠️ This user has <a href="%s">not enabled Fediverse sharing on their Threads.net account</a>.', 'friends' ),
+					'https://about.fb.com/news/2023/07/introducing-threads-new-app-text-sharing/'
+				);
+			}
+
+			$better_user_login = User::get_user_login_from_feeds( $feeds );
+			if ( $better_user_login ) {
+				$friend_user_login = trim( $better_user_login, '-' );
+			}
+
+			$better_display_name = User::get_display_name_from_feeds( $feeds );
+			if ( $better_display_name ) {
+				$friend_display_name = $better_display_name;
+				if ( ! $better_user_login ) {
+					$friend_user_login = trim( strtolower( str_replace( ' ', '-', sanitize_user( $better_display_name ) ) ), '-' );
+				}
+			}
+		}
+
+		if ( isset( $vars['quick-subscribe'] ) ) {
+			$vars['feeds'] = $feeds;
+			$vars['subscribe'] = array();
+			foreach ( $feeds as $feed_url => $details ) {
+				if ( isset( $details['autoselect'] ) && $details['autoselect'] ) {
+					$vars['subscribe'][] = $feed_url;
+				}
+			}
+
+			$avatar = null;
+			$description = null;
+			foreach ( $feeds as $feed_details ) {
+				if ( ! $avatar && ! empty( $feed_details['avatar'] ) ) {
+					$avatar = $feed_details['avatar'];
+				}
+				if ( ! $description && ! empty( $feed_details['description'] ) ) {
+					$description = $feed_details['description'];
+				}
+			}
+
+			$friend_user = User::create( $friend_user_login, 'subscription', $friend_url, $friend_display_name, $avatar, $description );
+
+			return $this->process_admin_add_friend_response( $friend_user, $vars );
+		}
+
+		Friends::template_loader()->get_template_part(
+			'admin/settings-header',
+			null,
+			array(
+				'active' => 'add-friend-confirm',
+				'title'  => __( 'Add Friend', 'friends' ),
+				'menu'   => array(
+					'1. ' . __( 'Enter Details', 'friends' ) => array(
+						'page' => 'add-friend',
+						'url'  => ! empty( $friend_url ) ? $friend_url : false,
+					),
+					'2. ' . __( 'Confirm', 'friends' ) => 'add-friend-confirm',
+				),
+			)
+		);
+
+		if ( $errors->has_errors() ) {
+			?>
+			<div id="message" class="updated notice is-dismissible"><p><?php echo wp_kses( $errors->get_error_message(), array( 'strong' => array() ) ); ?></p>
+			</div>
+			<?php
+		}
+
+		Friends::template_loader()->get_template_part(
+			'admin/select-feeds',
+			null,
+			array_merge(
+				$args,
+				array(
+					'friend_url'          => $friend_url,
+					'friend_user_login'   => $friend_user_login,
+					'friend_display_name' => $friend_display_name,
+					'post_formats'        => array_merge( array( 'autodetect' => __( 'Autodetect Post Format', 'friends' ) ), get_post_format_strings() ),
+					'registered_parsers'  => $this->friends->feed->get_registered_parsers(),
+					'feeds'               => $feeds,
+				)
+			)
+		);
+	}
+
+	/**
+	 * Render the admin form for following someone.
+	 */
+	public function render_admin_add_friend() {
+		if ( ! Friends::has_required_privileges() ) {
+			wp_die( esc_html__( 'Sorry, you are not allowed to do this.', 'friends' ) );
+		}
+
+		if ( ! empty( $_GET['preview'] ) ) {
+			$url = sanitize_text_field( wp_unslash( $_GET['preview'] ) );
+
+			?>
+			<h1>
+				<?php
+				// translators: %s is a URL.
+				echo esc_html( sprintf( __( 'Preview for %s', 'friends' ), $url ) );
+				?>
+			</h1>
+			<?php
+
+			if ( ! isset( $_GET['_wpnonce'] ) || ! wp_verify_nonce( sanitize_key( $_GET['_wpnonce'] ), 'preview-feed' ) ) {
+				?>
+				<div id="message" class="updated notice is-dismissible"><p><?php esc_html_e( 'For security reasons, this preview is not available.', 'friends' ); ?></p>
+				</div>
+				<?php
+				return;
+			}
+			$parser = false;
+			if ( isset( $_GET['parser'] ) ) {
+				$parser_name = $this->friends->feed->get_registered_parser( sanitize_text_field( wp_unslash( $_GET['parser'] ) ) );
+				$parser = $this->friends->feed->get_feed_parser( sanitize_text_field( wp_unslash( $_GET['parser'] ) ) );
+			}
+			if ( ! $parser ) {
+				?>
+				<div id="message" class="updated notice is-dismissible"><p><?php esc_html_e( 'An unknown parser name was supplied.', 'friends' ); ?></p>
+				</div>
+				<?php
+				return;
+			}
+			?>
+			<h3><?php esc_html_e( 'Parser Details', 'friends' ); ?></h3>
+			<ul id="parser">
+				<li>
+					<?php
+					echo wp_kses(
+						// translators: %s is the name of a parser, e.g. simplepie.
+						sprintf( __( 'Parser: %s', 'friends' ), $parser_name ),
+						array(
+							'a' => array(
+								'href'   => array(),
+								'rel'    => array(),
+								'target' => array(),
+							),
+						)
+					);
+					?>
+				</li>
+			</ul>
+			<h3><?php esc_html_e( 'Items in the Feed', 'friends' ); ?></h3>
+
+			<?php
+			$feed_id = null;
+			if ( isset( $_GET['feed'] ) ) {
+				$feed_id = intval( $_GET['feed'] );
+			}
+			$items = $this->friends->feed->preview( $parser, $url, $feed_id );
+			if ( is_wp_error( $items ) ) {
+				?>
+				<div id="message" class="updated notice is-dismissible"><p><?php echo esc_html( $items->get_error_message() ); ?></p>
+				</div>
+				<?php
+				return;
+			}
+			?>
+
+			<ul>
+				<?php
+				foreach ( $items as $item ) {
+					$title = $item->title;
+					if ( 'status' === $item->post_format ) {
+						$title = wp_strip_all_tags( $item->content );
+					}
+					?>
+					<li>
+						<?php if ( $title ) : ?>
+							<details><summary>
+						<?php endif; ?>
+							<a href="<?php echo esc_url( $item->permalink ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( $item->date ); ?></a> (author: <?php echo esc_html( $item->author ); ?>, type: <?php echo esc_html( $item->post_format ); ?>):
+						<?php if ( $title ) : ?>
+							<a href="<?php echo esc_url( $item->permalink ); ?>" target="_blank" rel="noopener noreferrer"><?php echo esc_html( $title ); ?></a> <?php echo esc_html( str_word_count( wp_strip_all_tags( $item->content ) ) ); ?> words</summary>
+						<?php else : ?>
+							<p>
+						<?php endif; ?>
+							<?php echo esc_textarea( $item->content ); ?>
+						<?php if ( $title ) : ?>
+							</details>
+						<?php else : ?>
+							</p>
+						<?php endif; ?>
+						</li>
+						<?php
+				}
+				?>
+				</ul>
+				<?php
+				return;
+		}
+
+		if ( apply_filters( 'friends_debug', false ) && isset( $_GET['next'] ) ) {
+			$_POST = $_REQUEST; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			$_POST['_wpnonce'] = wp_create_nonce( 'add-friend' );
+			if ( ! empty( $_POST['url'] ) && ! isset( $_POST['friend_url'] ) ) {
+				$friend_url = sanitize_text_field( wp_unslash( $_POST['url'] ) );
+				$parsed_url = wp_parse_url( $friend_url );
+				if ( isset( $parsed_url['host'] ) ) {
+					if ( ! isset( $parsed_url['scheme'] ) ) {
+						$friend_url = 'https://' . ltrim( $friend_url, '/' );
+					}
+				}
+				$_POST['friend_url'] = $friend_url;
+			}
+		}
+
+		$response = null;
+		$postdata = apply_filters( 'friends_add_friend_postdata', $_POST );
+		if ( ! empty( $postdata ) ) {
+			if ( ! wp_verify_nonce( sanitize_key( $postdata['_wpnonce'] ), 'add-friend' ) ) {
+				$response = new \WP_Error( 'invalid-nonce', __( 'For security reasons, please verify the URL and click next if you want to proceed.', 'friends' ) );
+			} else {
+				$response = $this->process_admin_add_friend( $postdata );
+			}
+			if ( is_wp_error( $response ) ) {
+				?>
+				<div id="message" class="updated notice is-dismissible"><p>
+					<?php
+					$message = $response->get_error_message();
+					if ( $response->get_error_data() ) {
+						$message .= ' (' . $response->get_error_data() . ')';
+					}
+					echo wp_kses(
+						$message,
+						array(
+							'strong' => array(),
+							'a'      => array(
+								'href'   => array(),
+								'rel'    => array(),
+								'target' => array(),
+							),
+						)
+					);
+					?>
+				</p>
+			</div>
+				<?php
+			}
+			if ( is_null( $response ) ) {
+				return;
+			}
+		}
+
+		$args = array(
+			'friend_url'              => '',
+			'add-friends-placeholder' => apply_filters( 'friends_add_friends_input_placeholder', __( 'Enter URL', 'friends' ) ),
+		);
+
+		if ( ! empty( $_REQUEST['url'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			$friend_url = sanitize_text_field( wp_unslash( $_REQUEST['url'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			$parsed_url = wp_parse_url( $friend_url );
+			if ( isset( $parsed_url['host'] ) ) {
+				if ( ! isset( $parsed_url['scheme'] ) ) {
+					$args['friend_url'] = apply_filters( 'friends_rewrite_incoming_url', 'https://' . ltrim( $friend_url, '/' ), $friend_url, $parsed_url );
+				} else {
+					$args['friend_url'] = $friend_url;
+				}
+			} elseif ( class_exists( 'Friends\Feed_Parser_ActivityPub' ) && preg_match( '/^@?' . Feed_Parser_ActivityPub::ACTIVITYPUB_USERNAME_REGEXP . '$/i', $friend_url ) ) {
+				$args['friend_url'] = $friend_url;
+			}
+		}
+
+		Friends::template_loader()->get_template_part(
+			'admin/settings-header',
+			null,
+			array(
+				'active' => 'add-friend',
+				'title'  => __( 'Add Friend', 'friends' ),
+				'menu'   => array(
+					'1. ' . __( 'Enter Details', 'friends' ) => array(
+						'page' => 'add-friend',
+						'url'  => ! empty( $friend_url ) ? $friend_url : false,
+					),
+					'2. ' . __( 'Confirm', 'friends' ) => false,
+				),
+			)
+		);
+
+		Friends::template_loader()->get_template_part( 'admin/add-friend', null, $args );
+
+		Friends::template_loader()->get_template_part(
+			'admin/latest-friends',
+			null,
+			array(
+				'friend_requests' => User_Query::recent_friends_subscriptions( 25 )->get_results(),
+			)
+		);
+		Friends::template_loader()->get_template_part( 'admin/settings-footer', null, $args );
 	}
 
 	/**
@@ -2498,5 +2984,48 @@ class Admin {
 		$query = $author->modify_query_by_author( $query );
 
 		return $query;
+	}
+
+	/**
+	 * Render an "ActivityPub plugin not active" notice for activitypub-parser feeds
+	 * when the ActivityPub plugin is not loaded (so Feed_Parser_ActivityPub never fires).
+	 *
+	 * @param User_Feed $feed      The feed.
+	 * @param int       $term_id   The term ID.
+	 * @param string    $parser    The parser slug.
+	 */
+	public function maybe_render_activitypub_inactive_notice( $feed, $term_id, $parser ) {
+		if ( 'activitypub' !== $parser ) {
+			return;
+		}
+
+		if ( class_exists( '\Activitypub\Activitypub' ) ) {
+			return;
+		}
+		?>
+		<div class="activitypub-subscription-check">
+			<div class="ap-section-header"><?php esc_html_e( 'ActivityPub Plugin', 'friends' ); ?></div>
+			<div class="ap-data-grid">
+				<span class="ap-data-label"><?php esc_html_e( 'Status', 'friends' ); ?></span>
+				<span class="ap-data-value"><em style="color: orange;"><?php esc_html_e( 'not active', 'friends' ); ?></em></span>
+			</div>
+			<div class="ap-section-footer">
+				<?php
+				if ( current_user_can( 'activate_plugins' ) ) {
+					echo wp_kses(
+						sprintf(
+							/* translators: %s is a link to the plugin search page */
+							__( 'The <a href="%s">ActivityPub plugin</a> is required to receive posts from this feed.', 'friends' ),
+							esc_url( admin_url( 'plugin-install.php?s=activitypub&tab=search&type=term' ) )
+						),
+						array( 'a' => array( 'href' => array() ) )
+					);
+				} else {
+					esc_html_e( 'The ActivityPub plugin is required to receive posts from this feed.', 'friends' );
+				}
+				?>
+			</div>
+		</div>
+		<?php
 	}
 }

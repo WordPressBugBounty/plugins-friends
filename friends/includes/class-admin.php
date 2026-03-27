@@ -434,6 +434,11 @@ class Admin {
 			}
 		}
 
+		if ( ! $user || is_wp_error( $user ) ) {
+			$cache[ $cache_key ] = false;
+			return $link;
+		}
+
 		if ( is_multisite() && is_super_admin( $user->ID ) ) {
 			$cache[ $cache_key ] = false;
 			return $link;
@@ -448,9 +453,16 @@ class Admin {
 	}
 
 	public static function get_edit_friend_link( $user ) {
-		if ( ! $user instanceof \WP_User ) {
-			$user = new \WP_User( $user );
+		if ( is_string( $user ) ) {
+			$user = User::get_by_username( $user );
+		} elseif ( ! $user instanceof User && ! $user instanceof Subscription ) {
+			$user = new User( $user );
 		}
+
+		if ( ! $user || is_wp_error( $user ) ) {
+			return '';
+		}
+
 		return apply_filters( 'get_edit_user_link', $user->user_url, $user->user_login );
 	}
 
@@ -1536,6 +1548,12 @@ class Admin {
 					$friend->user_url = $user_url;
 				}
 			}
+			if ( isset( $_POST['friends_user_login'] ) ) {
+				$new_user_login = User::sanitize_username( sanitize_text_field( wp_unslash( $_POST['friends_user_login'] ) ) );
+				if ( $new_user_login && $new_user_login !== $friend->user_login ) {
+					$friend->update_user_login( $new_user_login );
+				}
+			}
 			$friend->save();
 		} else {
 			return;
@@ -1543,11 +1561,8 @@ class Admin {
 
 		do_action( 'friends_edit_friend_after_form_submit', $friend );
 
-		if ( isset( $_GET['_wp_http_referer'] ) ) {
-			wp_safe_redirect( add_query_arg( $arg, rawurlencode( $arg_value ), wp_get_referer() ) );
-		} else {
-			wp_safe_redirect( add_query_arg( $arg, rawurlencode( $arg_value ), remove_query_arg( array( '_wp_http_referer', '_wpnonce' ) ) ) );
-		}
+		$redirect_url = self_admin_url( 'admin.php?page=edit-friend&user=' . $friend->user_login );
+		wp_safe_redirect( add_query_arg( $arg, rawurlencode( $arg_value ), $redirect_url ) );
 		exit;
 	}
 

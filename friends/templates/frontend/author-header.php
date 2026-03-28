@@ -252,8 +252,8 @@ endforeach;
 	</span>
 <?php endif; ?>
 
-<?php if ( $args['friend_user']->can_refresh_feeds() && apply_filters( 'friends_debug', false ) ) : ?>
-<a class="chip" href="<?php echo esc_url( wp_nonce_url( add_query_arg( 'user', $args['friend_user']->user_login, self_admin_url( 'admin.php?page=friends-refresh' ) ), 'friends-refresh' ) ); ?>"><?php esc_html_e( 'Refresh', 'friends' ); ?></a>
+<?php if ( $args['friend_user']->can_refresh_feeds() ) : ?>
+<a class="chip refresh-feeds" href="" data-user="<?php echo esc_attr( $args['friend_user']->user_login ); ?>" data-nonce="<?php echo esc_attr( wp_create_nonce( 'friends-refresh' ) ); ?>"><?php esc_html_e( 'Refresh', 'friends' ); ?></a>
 <?php endif; ?>
 
 <a class="chip toggle-compact" href=""><?php echo esc_html( 'collapsed' === $args['frontend_default_view'] ? __( 'Expanded mode', 'friends' ) : __( 'Compact mode', 'friends' ) ); ?></a>
@@ -265,7 +265,8 @@ endforeach;
 ( function() {
 	var header = document.getElementById( 'author-header' );
 	if ( ! header ) return;
-	var navbar = header.closest( 'header' );
+	var titleRow = header.closest( '.mastodon-col-header' );
+	var navbar = header.closest( 'header' ) || ( titleRow ? titleRow.querySelector( '.mastodon-col-title-row' ) : null );
 	if ( ! navbar ) return;
 	navbar.classList.add( 'has-header-image' );
 	navbar.style.backgroundImage = header.style.backgroundImage;

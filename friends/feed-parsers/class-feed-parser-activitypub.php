@@ -335,7 +335,11 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			if ( ! empty( $actor_metadata['preferredUsername'] ) ) {
 				$status->reblog->account->id = $attributed_to_url;
 				$status->reblog->account->username = $actor_metadata['preferredUsername'];
-				$status->reblog->account->acct = self::convert_actor_to_mastodon_handle( $attributed_to_url );
+				$acct = self::convert_actor_to_mastodon_handle( $attributed_to_url );
+				if ( $acct === $attributed_to_url && ! empty( $meta['attributedTo']['ap_actor_id'] ) && class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+					$acct = \Activitypub\Collection\Remote_Actors::get_acct( $meta['attributedTo']['ap_actor_id'] );
+				}
+				$status->reblog->account->acct = $acct;
 				if ( ! empty( $actor_metadata['name'] ) ) {
 					$status->reblog->account->display_name = $actor_metadata['name'];
 				}
@@ -831,7 +835,11 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			$actor = self::convert_actor_to_mastodon_handle( $attributed_to );
 		}
 		$account = new Entity_Account();
-		$account->id           = $attributed_to;
+		if ( ! empty( $meta['attributedTo']['ap_actor_id'] ) ) {
+			$account->id = \strval( $meta['attributedTo']['ap_actor_id'] );
+		} else {
+			$account->id = $attributed_to;
+		}
 		$account->username     = strtok( $actor, '@' );
 		$account->acct         = $actor;
 		$account->url          = $attributed_to;
@@ -4366,14 +4374,59 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		);
 	}
 
+	/**
+	 * Check if a post's permalink supports ActivityPub.
+	 *
+	 * Returns true if the post was parsed by the ActivityPub parser,
+	 * has ActivityPub metadata, or its permalink host is a known ActivityPub instance.
+	 *
+	 * @param int $post_id The post ID.
+	 * @return bool Whether the post supports ActivityPub.
+	 */
+	public static function post_supports_activitypub( $post_id ) {
+		if ( User_Feed::get_parser_for_post_id( $post_id ) === self::SLUG ) {
+			return true;
+		}
+
+		$meta = get_post_meta( $post_id, self::SLUG, true );
+		if ( $meta ) {
+			return true;
+		}
+
+		$post = get_post( $post_id );
+		if ( $post && $post->guid ) {
+			$host = wp_parse_url( $post->guid, PHP_URL_HOST );
+			if ( $host && self::is_known_activitypub_host( $host ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	public static function enable_comments_form( bool $comments_open, int $post_id ) {
-		if ( is_user_logged_in() && User_Feed::get_parser_for_post_id( $post_id ) === self::SLUG ) {
+		if ( is_user_logged_in() && self::post_supports_activitypub( $post_id ) ) {
 			return true;
 		}
 		return $comments_open;
 	}
 
 	public static function comment_form( $post_id ) {
+		if ( ! self::post_supports_activitypub( $post_id ) ) {
+			$post = get_post( $post_id );
+			if ( $post ) {
+				printf(
+					'<p class="friends-activitypub-comment-unavailable">%s</p>',
+					sprintf(
+						/* translators: %s is a link to the original post */
+						__( 'Commenting via ActivityPub is not available for this post. You can try to <a href="%s" target="_blank" rel="noopener noreferrer">comment at the source</a>.', 'friends' ),
+						esc_url( $post->guid )
+					)
+				);
+			}
+			return;
+		}
+
 		$post = get_post( $post_id );
 		$mentions = self::extract_html_mentions( $post->post_content );
 		$meta = get_post_meta( $post->ID, self::SLUG, true );
@@ -4428,13 +4481,6 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	}
 
 	public function append_comment_form( $content, $post_id, ?User $friend_user = null, ?User_Feed $user_feed = null ) {
-		$meta = get_post_meta( $post_id, self::SLUG, true );
-		if ( ! $meta ) {
-			if ( User_Feed::get_parser_for_post_id( $post_id ) !== self::SLUG ) {
-				return $content;
-			}
-		}
-
 		ob_start();
 		self::comment_form( $post_id );
 		$comment_form = ob_get_contents();

@@ -9,6 +9,7 @@
  *   o/enter       - Toggle open/close current item
  *   s             - Toggle star reaction
  *   v             - Open original in new tab
+ *   cmd-k/ctrl-k  - Focus search
  *   ?             - Show keyboard shortcuts help
  */
 ( function( $ ) {
@@ -158,6 +159,19 @@
 
 	// Keyboard shortcuts.
 	$( document ).on( 'keydown', function( e ) {
+		// cmd-k / ctrl-k: focus search input (works in any context).
+		if ( ( e.metaKey || e.ctrlKey ) && 75 === e.keyCode ) {
+			e.preventDefault();
+			$( '.mastodon-search-input' ).first().focus();
+			return false;
+		}
+
+		// Escape: blur search input.
+		if ( 27 === e.keyCode && $( e.target ).is( '.mastodon-search-input' ) ) {
+			$( e.target ).blur();
+			return false;
+		}
+
 		if ( $( e.target ).is( 'input, textarea, select, [contenteditable]' ) ) {
 			return;
 		}
@@ -262,6 +276,7 @@
 						'<tr><td style="padding:2px 12px 2px 0"><b>o / enter</b></td><td>Open / close item</td></tr>' +
 						'<tr><td style="padding:2px 12px 2px 0"><b>s</b></td><td>Toggle \u2b50 reaction</td></tr>' +
 						'<tr><td style="padding:2px 12px 2px 0"><b>v</b></td><td>Open original in new tab</td></tr>' +
+						'<tr><td style="padding:2px 12px 2px 0"><b>\u2318K / Ctrl-K</b></td><td>Search</td></tr>' +
 						'<tr><td style="padding:2px 12px 2px 0"><b>?</b></td><td>Show this help</td></tr>' +
 						'</table>' +
 						'<p style="margin:12px 0 0;color:light-dark(#606984,#4a4e69);font-size:11px">Press any key to close</p>' +
@@ -273,6 +288,229 @@
 					} );
 				}
 				return; // Don't let the one() handler fire immediately.
+		}
+	} );
+} )( jQuery );
+
+// @ mention autocomplete in the compose box.
+( function( $ ) {
+	var nonce = ( typeof friendsMastodon !== 'undefined' ) ? friendsMastodon.mentionNonce : '';
+	var $dropdown = null;
+	var currentTextarea = null;
+	var mentionStart = -1;
+	var activeIndex = -1;
+	var lastFetchedQuery = null;
+	var allResults = [];
+	var debounceTimer = null;
+	var noResultsTimer = null;
+
+	function getDropdown() {
+		if ( ! $dropdown ) {
+			$dropdown = $( '<ul class="mastodon-mention-dropdown"></ul>' ).hide().appendTo( 'body' );
+		}
+		return $dropdown;
+	}
+
+	function closeDropdown() {
+		clearTimeout( noResultsTimer );
+		if ( $dropdown ) {
+			$dropdown.hide();
+		}
+		mentionStart = -1;
+		activeIndex = -1;
+		lastFetchedQuery = null;
+		allResults = [];
+		currentTextarea = null;
+		clearTimeout( debounceTimer );
+	}
+
+	function getMentionContext( textarea ) {
+		var text = textarea.value.substring( 0, textarea.selectionStart );
+		var match = text.match( /@(\w*)$/ );
+		if ( ! match ) {
+			return null;
+		}
+		return { query: match[ 1 ], start: text.length - match[ 0 ].length };
+	}
+
+	function positionDropdown( textarea ) {
+		var $form = $( textarea ).closest( '.mastodon-compose-form' );
+		var offset = $form.offset();
+		getDropdown().css( {
+			top: offset.top + $form.outerHeight(),
+			left: offset.left,
+			width: $form.outerWidth()
+		} );
+	}
+
+	function setActive( index ) {
+		var $items = getDropdown().find( 'li:not(.mastodon-mention-no-results)' );
+		$items.removeClass( 'active' );
+		if ( ! $items.length ) {
+			activeIndex = -1;
+			return;
+		}
+		activeIndex = Math.max( 0, Math.min( index, $items.length - 1 ) );
+		$items.eq( activeIndex ).addClass( 'active' );
+	}
+
+	function acceptActive() {
+		if ( activeIndex < 0 ) {
+			return false;
+		}
+		var $item = $dropdown.find( 'li:not(.mastodon-mention-no-results)' ).eq( activeIndex ).find( 'a' );
+		if ( ! $item.length ) {
+			return false;
+		}
+		$item.trigger( 'mousedown' );
+		return true;
+	}
+
+	function buildItem( item ) {
+		var $li = $( '<li></li>' );
+		var $a = $( '<a href="#"></a>' );
+		if ( item.avatar ) {
+			$a.append( $( '<img>' ).attr( { src: item.avatar, width: 24, height: 24 } ) );
+		}
+		$a.append( $( '<span class="mastodon-mention-name"></span>' ).text( item.display_name ) );
+		$a.append( $( '<span class="mastodon-mention-handle"></span>' ).text( '@' + item.handle ) );
+		$a.on( 'mousedown', function( e ) {
+			e.preventDefault();
+			if ( ! currentTextarea ) {
+				return;
+			}
+			var value = currentTextarea.value;
+			var cursor = currentTextarea.selectionStart;
+			var mention = '@' + item.handle + ' ';
+			currentTextarea.value = value.substring( 0, mentionStart ) + mention + value.substring( cursor );
+			var pos = mentionStart + mention.length;
+			currentTextarea.setSelectionRange( pos, pos );
+			var ta = currentTextarea;
+			closeDropdown();
+			ta.focus();
+		} );
+		$li.append( $a );
+		return $li;
+	}
+
+	function renderResults( results, textarea ) {
+		clearTimeout( noResultsTimer );
+		var $dd = getDropdown();
+		$dd.empty();
+		if ( results.length ) {
+			results.forEach( function( item ) {
+				$dd.append( buildItem( item ) );
+			} );
+			positionDropdown( textarea );
+			$dd.show();
+			activeIndex = -1;
+		} else {
+			$dd.append( '<li class="mastodon-mention-no-results"><span>No results</span></li>' );
+			positionDropdown( textarea );
+			$dd.show();
+			activeIndex = -1;
+			noResultsTimer = setTimeout( closeDropdown, 500 );
+		}
+	}
+
+	function filterAndRender( query, textarea ) {
+		var q = query.toLowerCase();
+		var filtered = allResults.filter( function( item ) {
+			return item.display_name.toLowerCase().indexOf( q ) !== -1 ||
+				item.handle.toLowerCase().indexOf( q ) !== -1;
+		} );
+		renderResults( filtered, textarea );
+	}
+
+	$( document ).on( 'input', '.mastodon-compose-form textarea', function() {
+		var textarea = this;
+		var ctx = getMentionContext( textarea );
+
+		if ( ! ctx ) {
+			closeDropdown();
+			return;
+		}
+
+		currentTextarea = textarea;
+		mentionStart = ctx.start;
+
+		// Client-side filter of already-loaded results while debounce is pending.
+		if ( allResults.length ) {
+			filterAndRender( ctx.query, textarea );
+		}
+
+		clearTimeout( debounceTimer );
+
+		// Only fetch from server when the query extends beyond what we already fetched.
+		if ( lastFetchedQuery !== null && ctx.query.indexOf( lastFetchedQuery ) === 0 ) {
+			return;
+		}
+
+		debounceTimer = setTimeout( function() {
+			var query = ctx.query;
+			wp.ajax.send( 'friends-mention-autocomplete', {
+				data: { _ajax_nonce: nonce, q: query },
+				success: function( results ) {
+					allResults = results || [];
+					lastFetchedQuery = query;
+
+					// Re-read current context in case user typed more since the request fired.
+					var currentCtx = getMentionContext( textarea );
+					if ( currentCtx ) {
+						filterAndRender( currentCtx.query, textarea );
+					} else {
+						closeDropdown();
+					}
+				},
+				error: function() {
+					closeDropdown();
+				}
+			} );
+		}, 200 );
+	} );
+
+	$( document ).on( 'keydown', '.mastodon-compose-form textarea', function( e ) {
+		if ( ! $dropdown || ! $dropdown.is( ':visible' ) ) {
+			return;
+		}
+
+		var count = $dropdown.find( 'li:not(.mastodon-mention-no-results)' ).length;
+
+		if ( 40 === e.keyCode ) { // Down arrow.
+			e.preventDefault();
+			setActive( activeIndex < 0 ? 0 : ( activeIndex + 1 ) % count );
+		} else if ( 38 === e.keyCode ) { // Up arrow.
+			e.preventDefault();
+			setActive( activeIndex < 0 ? count - 1 : ( activeIndex - 1 + count ) % count );
+		} else if ( 9 === e.keyCode ) { // Tab — accept top item if nothing active, else accept active.
+			if ( count ) {
+				e.preventDefault();
+				if ( activeIndex < 0 ) {
+					setActive( 0 );
+				}
+				acceptActive();
+			}
+		} else if ( 13 === e.keyCode && activeIndex >= 0 ) { // Enter.
+			e.preventDefault();
+			acceptActive();
+		} else if ( 27 === e.keyCode ) { // Escape.
+			closeDropdown();
+		}
+	} );
+
+	$( document ).on( 'blur', '.mastodon-compose-form textarea', function() {
+		setTimeout( function() {
+			if ( $dropdown && $dropdown.is( ':visible' ) && ! $dropdown.find( ':focus' ).length ) {
+				closeDropdown();
+			}
+		}, 150 );
+	} );
+
+	$( document ).on( 'click', function( e ) {
+		if ( $dropdown && $dropdown.is( ':visible' ) ) {
+			if ( ! $( e.target ).closest( '.mastodon-compose-form, .mastodon-mention-dropdown' ).length ) {
+				closeDropdown();
+			}
 		}
 	} );
 } )( jQuery );

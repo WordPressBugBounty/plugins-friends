@@ -5,7 +5,7 @@
 - Requires PHP: 7.2
 - Tested up to: 7.0
 - License: GPL-2.0-or-later
-- Stable tag: 4.0.6
+- Stable tag: 4.1.0
 
 A self-hosted social reader for WordPress: follow people via RSS and ActivityPub, with multiple themes and a plugin ecosystem.
 
@@ -28,6 +28,7 @@ You can...
 - Get full-post email notifications from your favorite blogs.
 - Save posts to a collection for later reference (via the Post Collection plugin).
 - Send posts to your eReader (via the Send to E-Reader plugin).
+- Subscribe to any site with one click using the [Friends browser extension](https://chromewebstore.google.com/detail/friends/ledbghpaplkpclndlommpbokndieflhl) (also available [for Firefox](https://addons.mozilla.org/en-US/firefox/addon/wpfriends/)).
 
 [![Friends Plugin Demo on Youtube](img/friends-plugin-youtube-thumbnail.png)](https://www.youtube.com/watch?v=4bz6GluXnsk)
 
@@ -61,6 +62,9 @@ That's exactly the point — with WordPress you own your data and decide where t
 ### What happens if I modify or delete a post?
 Cached posts are stored as the custom post type `friend_post_cache`. When you unfollow someone, their cached posts are removed with them.
 
+### Is there a browser extension?
+Yes — install it for [Chrome](https://chromewebstore.google.com/detail/friends/ledbghpaplkpclndlommpbokndieflhl) or [Firefox](https://addons.mozilla.org/en-US/firefox/addon/wpfriends/). It adds a toolbar button that lets you subscribe to the site you are currently visiting with one click. Pair it with the API key on the Friends → Browser Extension page to also expose quick actions from other Friends-aware plugins (saving to a collection, sending to your eReader, etc.).
+
 ## Screenshots
 
 1. Mastodon-style theme
@@ -73,6 +77,16 @@ Cached posts are stored as the custom post type `friend_post_cache`. When you un
 8. Followed people are stored as taxonomy terms
 
 ## Changelog
+
+### 4.1.0
+- Add a frontend Add Friend page with feed review and OPML import support. ([#516])
+- Surface the Friends browser extension in more places so users can discover it: the Browser Extension submenu is now always visible under Friends, the settings page describes what the extension does and links to the Chrome and Firefox stores, and the Tools → Bookmarklets card and README mention it as well. ([#663])
+- Document that a category can be specified. ([#664])
+- Prevent the ActivityPub plugin from federating cached friend posts so remote content stored locally is never announced as the site's own activity. ([#665])
+- Add generic inline browser extension action dispatching so companion plugins can provide authenticated in-popup actions through Friends filters. ([#666])
+- Show and pad the welcome content in the shipped frontend themes. ([#667])
+- Add WordPress Abilities for AI Assistant to manage Friends subscriptions, feeds, single-feed refreshes, bulk refreshes, and cached timeline items. ([#668])
+- Require changelog entries to come from PR body details and add release-prep dry-run validation. ([#669])
 
 ### 4.0.6
 - Fix conversation accounts for migrated users by falling back to friends_feed_url meta when post_author is 0. ([#655])
@@ -499,6 +513,7 @@ Hoping that this hardening will bring back the plugin to the WordPress.org direc
 [#546]: https://github.com/akirk/friends/pull/546
 [#362]: https://github.com/akirk/friends/pull/362
 [#515]: https://github.com/akirk/friends/pull/515
+[#516]: https://github.com/akirk/friends/pull/516
 [#547]: https://github.com/akirk/friends/pull/547
 [#551]: https://github.com/akirk/friends/pull/551
 [#553]: https://github.com/akirk/friends/pull/553
@@ -574,3 +589,11 @@ Hoping that this hardening will bring back the plugin to the WordPress.org direc
 [#658]: https://github.com/akirk/friends/pull/658
 [#659]: https://github.com/akirk/friends/pull/659
 [#661]: https://github.com/akirk/friends/pull/661
+
+[#663]: https://github.com/akirk/friends/pull/663
+[#664]: https://github.com/akirk/friends/pull/664
+[#665]: https://github.com/akirk/friends/pull/665
+[#666]: https://github.com/akirk/friends/pull/666
+[#667]: https://github.com/akirk/friends/pull/667
+[#668]: https://github.com/akirk/friends/pull/668
+[#669]: https://github.com/akirk/friends/pull/669

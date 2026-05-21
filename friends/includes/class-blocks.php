@@ -96,6 +96,13 @@ class Blocks {
 			)
 		);
 
+		register_block_type(
+			'friends/add-friend-form',
+			array(
+				'render_callback' => array( $this, 'render_add_friend_form_block' ),
+			)
+		);
+
 		$list_supports = array(
 			'color'      => array(
 				'background' => true,
@@ -189,6 +196,20 @@ class Blocks {
 			array(
 				'render_callback' => array( $this, 'render_feed_chips_block' ),
 				'supports'        => $chip_supports,
+			)
+		);
+
+		register_block_type(
+			'friends/welcome',
+			array(
+				'attributes'      => array(
+					'forceWelcome' => array(
+						'type'    => 'boolean',
+						'default' => false,
+					),
+				),
+				'render_callback' => array( $this, 'render_welcome_block' ),
+				'supports'        => $list_supports,
 			)
 		);
 
@@ -322,6 +343,19 @@ class Blocks {
 		}
 
 		return '<ul class="wp-block-friends-subscriptions-query">' . $items . '</ul>';
+	}
+
+	/**
+	 * Render the friends/add-friend-form block.
+	 *
+	 * @return string The rendered block HTML.
+	 */
+	public function render_add_friend_form_block() {
+		ob_start();
+		Friends::template_loader()->get_template_part( 'frontend/add-friend-form' );
+		$form = ob_get_clean();
+
+		return '<div' . $this->get_wrapper_attributes( array( 'class' => 'wp-block-friends-add-friend-form' ) ) . '>' . $form . '</div>';
 	}
 
 	/**
@@ -873,6 +907,17 @@ class Blocks {
 
 		// Determine feed title.
 		$title = __( 'Main Feed', 'friends' );
+		if ( $frontend->template ) {
+			$template_titles = array(
+				'frontend/add-friend'    => __( 'Add Friend', 'friends' ),
+				'frontend/followers'     => __( 'Followers', 'friends' ),
+				'frontend/subscriptions' => __( 'Following', 'friends' ),
+			);
+			if ( isset( $template_titles[ $frontend->template ] ) ) {
+				$title = $template_titles[ $frontend->template ];
+			}
+		}
+
 		$format_titles = array(
 			'standard' => _x( 'Post feed', 'Post format', 'friends' ),
 			'aside'    => _x( 'Aside feed', 'Post format', 'friends' ),
@@ -979,6 +1024,30 @@ class Blocks {
 
 		$out .= '</div>';
 		return $out;
+	}
+
+	/**
+	 * Render the friends/welcome block.
+	 *
+	 * @param array $attributes Block attributes.
+	 * @return string The rendered block HTML.
+	 */
+	public function render_welcome_block( $attributes = array() ) {
+		$friends = Friends::get_instance();
+		$args    = array(
+			'friends'     => $friends,
+			'post_format' => $friends->frontend->post_format,
+		);
+
+		ob_start();
+		if ( empty( $attributes['forceWelcome'] ) && User_Query::all_associated_users()->get_total() > 0 ) {
+			Friends::template_loader()->get_template_part( 'frontend/no-posts', $args['post_format'], $args );
+		} else {
+			Friends::template_loader()->get_template_part( 'frontend/no-friends', $args['post_format'], $args );
+		}
+		$content = ob_get_clean();
+
+		return '<div ' . $this->get_wrapper_attributes( array( 'class' => 'wp-block-friends-welcome friends-empty-state' ) ) . '>' . $content . '</div>';
 	}
 
 	/**

@@ -56,6 +56,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		\add_action( 'activitypub_interactions_follow_url', array( $this, 'activitypub_interactions_follow_url' ), 10, 2 );
 		\add_filter( 'activitypub_comment_post_id', array( $this, 'activitypub_comment_post_id' ), 10, 3 );
 		\add_filter( 'activitypub_is_post_disabled', array( $this, 'disable_activitypub_for_cached_posts' ), 10, 2 );
+		\add_filter( 'activitypub_is_post_publicly_queryable', array( $this, 'activitypub_cached_post_publicly_queryable' ), 10, 2 );
 
 		\add_action( 'friends_user_feed_activated', array( $this, 'queue_follow_user' ), 10 );
 		\add_action( 'friends_user_feed_deactivated', array( $this, 'queue_unfollow_user' ), 10 );
@@ -122,6 +123,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		add_action( 'wp_ajax_friends-preview-activitypub', array( $this, 'ajax_preview' ) );
 		add_action( 'wp_ajax_friends-delete-follower', array( $this, 'ajax_delete_follower' ) );
 		add_action( 'wp_ajax_friends_check_activitypub_subscription', array( $this, 'ajax_check_subscription' ) );
+		add_action( 'wp_ajax_friends_check_activitypub_follower', array( $this, 'ajax_check_follower' ) );
 		add_action( 'wp_ajax_friends_relink_activitypub_actor', array( $this, 'ajax_relink_actor' ) );
 		add_action( 'wp_ajax_friends_refollow_activitypub', array( $this, 'ajax_refollow' ) );
 		add_action( 'friends_edit_feed_content_top', array( $this, 'render_subscription_check_button' ), 10, 3 );
@@ -258,8 +260,8 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 
 	public function mastodon_api_mapback_user_id( $user_id ) {
-		if ( ! is_string( $user_id ) && $user_id < 1e10 ) {
-			return $user_id;
+		if ( is_numeric( $user_id ) && $user_id < 1e10 ) {
+			return absint( $user_id );
 		}
 
 		$user = self::determine_mastodon_api_user( $user_id );
@@ -880,7 +882,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			return $post_id;
 		}
 		$send_to = null;
-		foreach ( $friend_user->get_active_feeds() as $user_feed ) {
+		foreach ( $friend_user->get_feeds() as $user_feed ) {
 			if ( 'activitypub' === $user_feed->get_parser() && $user_feed->get_url() === $to ) {
 				$send_to = $to;
 				break;
@@ -893,17 +895,6 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 
 		update_post_meta( $post_id, 'activitypub_content_visibility', ACTIVITYPUB_CONTENT_VISIBILITY_PRIVATE );
-		$inbox = \Activitypub\Http::get_remote_object( $send_to );
-
-		if ( ! $inbox || \is_wp_error( $inbox ) ) {
-			return new \WP_Error( 'friends_activitypub_inbox_error', __( 'Cannot get Activitypub inbox.', 'friends' ), compact( 'post_id', 'to', 'send_to' ) );
-		}
-		$inboxes = array();
-		if ( ! empty( $inbox['endpoints']['sharedInbox'] ) ) {
-			$inboxes[] = $inbox['endpoints']['sharedInbox'];
-		} elseif ( ! empty( $inbox['inbox'] ) ) {
-			$inboxes[] = $inbox['inbox'];
-		}
 
 		require_once __DIR__ . '/activitypub/class-activitypub-transformer-message.php';
 
@@ -919,26 +910,38 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 		$transformer->set_content_visibility( ACTIVITYPUB_CONTENT_VISIBILITY_PRIVATE );
 		$transformer->to = array( $send_to );
+		$reply_to_url    = null;
 		if ( $reply_to_post_id ) {
 			$reply_to = get_post( $reply_to_post_id );
 			if ( ! is_wp_error( $reply_to ) ) {
-				$transformer->in_reply_to = $reply_to->guid;
+				$reply_to_url               = $reply_to->guid;
+				$transformer->in_reply_to = $reply_to_url;
 			}
 		}
 		$object = $transformer->to_object();
+		$object->set_content( $transformer->get_rendered_content() );
+		$object->set_to( array( $send_to ) );
+		if ( $reply_to_url ) {
+			$object->set_in_reply_to( $reply_to_url );
+		}
 
 		$activity = new \Activitypub\Activity\Activity();
 		$activity->set_type( 'Create' );
 		$activity->set_id( home_url( '?p=' . $post_id ) . '#direct-message' );
 		$activity->set_actor( $actor->get_id() );
 		$activity->set_object( $object );
-		$activity->set_to( $send_to );
+		$activity->set_to( array( $send_to ) );
 
-		$json = $activity->to_json();
-
-		foreach ( $inboxes as $inbox ) {
-			$result = \Activitypub\safe_remote_post( $inbox, $json, $actor->get__id() );
+		$outbox_activity_id = \Activitypub\add_to_outbox( $activity, null, $actor->get__id(), ACTIVITYPUB_CONTENT_VISIBILITY_PRIVATE );
+		if ( ! $outbox_activity_id ) {
+			return new \WP_Error(
+				'friends_activitypub_outbox_error',
+				__( 'Could not add ActivityPub direct message to the outbox.', 'friends' ),
+				compact( 'post_id', 'to', 'send_to' )
+			);
 		}
+
+		update_post_meta( $post_id, 'activitypub_direct_message_outbox_id', $outbox_activity_id );
 
 		return $post_id;
 	}
@@ -949,6 +952,13 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		if ( Friends::check_url( $actor_url ) ) {
 			// Let's check if we follow this actor. If not it might be a different URL representation.
 			$user_feed = $this->friends_feed->get_user_feed_by_url( $actor_url );
+		}
+
+		if ( ( ! $user_feed || is_wp_error( $user_feed ) ) && class_exists( '\Activitypub\Collection\Remote_Actors' ) && Friends::check_url( $actor_url ) ) {
+			$ap_actor_post = \Activitypub\Collection\Remote_Actors::get_by_uri( $actor_url );
+			if ( ! is_wp_error( $ap_actor_post ) ) {
+				$user_feed = User_Feed::get_by_ap_actor_id( $ap_actor_post->ID );
+			}
 		}
 
 		$object = $activity['object'];
@@ -963,6 +973,13 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		if ( ! $user_feed || is_wp_error( $user_feed ) ) {
 			$actor = apply_filters( 'friends_get_activitypub_metadata', array(), $actor_url );
 			if ( ! $actor || is_wp_error( $actor ) ) {
+				return;
+			}
+
+			$friend_user = $this->create_message_sender_from_actor( $actor_url, $actor );
+			if ( ! is_wp_error( $friend_user ) && $friend_user instanceof User ) {
+				$feed_url = ! empty( $actor['id'] ) && Friends::check_url( $actor['id'] ) ? $actor['id'] : $actor_url;
+				do_action( 'notify_friend_message_received', $friend_user, $message, $subject, $feed_url, $remote_url, $reply_to );
 				return;
 			}
 
@@ -989,7 +1006,76 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 		$friend_user = $user_feed->get_friend_user();
 
-		do_action( 'notify_friend_message_received', $friend_user, $message, $subject, $actor_url, $remote_url, $reply_to );
+		do_action( 'notify_friend_message_received', $friend_user, $message, $subject, $user_feed->get_url(), $remote_url, $reply_to );
+	}
+
+	/**
+	 * Create an inactive subscription identity for an ActivityPub DM sender.
+	 *
+	 * Receiving a direct message must make the sender visible and replyable, but
+	 * must not silently follow them or import their public outbox.
+	 *
+	 * @param string $actor_url The actor URL from the incoming activity.
+	 * @param array  $actor     The resolved actor metadata.
+	 * @return User|\WP_Error The sender subscription or an error.
+	 */
+	private function create_message_sender_from_actor( $actor_url, $actor ) {
+		$canonical_actor_url = ! empty( $actor['id'] ) && Friends::check_url( $actor['id'] ) ? $actor['id'] : $actor_url;
+		if ( ! Friends::check_url( $canonical_actor_url ) ) {
+			return new \WP_Error( 'invalid_actor_url', __( 'Invalid ActivityPub actor URL.', 'friends' ) );
+		}
+
+		$display_name = null;
+		if ( ! empty( $actor['name'] ) ) {
+			$display_name = $actor['name'];
+		} elseif ( ! empty( $actor['preferredUsername'] ) ) {
+			$display_name = $actor['preferredUsername'];
+		}
+
+		$avatar_url = null;
+		if ( ! empty( $actor['icon']['url'] ) ) {
+			$avatar_url = $actor['icon']['url'];
+		} elseif ( ! empty( $actor['icon'] ) && is_string( $actor['icon'] ) ) {
+			$avatar_url = $actor['icon'];
+		}
+
+		$host = wp_parse_url( $canonical_actor_url, PHP_URL_HOST );
+		$user_login = sanitize_title( ( $actor['preferredUsername'] ?? 'activitypub' ) . '.' . $host );
+
+		$friend_user = Subscription::create(
+			$user_login,
+			'subscription',
+			$canonical_actor_url,
+			$display_name,
+			$avatar_url,
+			$actor['summary'] ?? null
+		);
+
+		if ( is_wp_error( $friend_user ) ) {
+			return $friend_user;
+		}
+
+		$user_feed = $friend_user->save_feed(
+			$canonical_actor_url,
+			array(
+				'parser' => self::SLUG,
+				'active' => false,
+				'title'  => $display_name ? $display_name : $canonical_actor_url,
+			)
+		);
+
+		if ( is_wp_error( $user_feed ) ) {
+			return $user_feed;
+		}
+
+		if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			$actor_post = \Activitypub\Collection\Remote_Actors::fetch_by_uri( $canonical_actor_url );
+			if ( ! is_wp_error( $actor_post ) && $actor_post instanceof \WP_Post ) {
+				$user_feed->set_ap_actor_id( $actor_post->ID );
+			}
+		}
+
+		return $friend_user;
 	}
 
 	public function register_post_meta() {
@@ -1465,6 +1551,54 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	}
 
 	/**
+	 * AJAX handler for checking whether an ActivityPub actor follows the current user.
+	 */
+	public function ajax_check_follower() {
+		if ( ! isset( $_POST['actor_url'] ) ) {
+			wp_send_json_error( 'missing-parameters' );
+		}
+
+		check_ajax_referer( 'friends-check-follower' );
+
+		if ( ! is_user_logged_in() ) {
+			wp_send_json_error( 'not-authorized' );
+		}
+
+		if ( ! class_exists( '\Activitypub\Collection\Followers' ) ) {
+			wp_send_json_error( 'activitypub-plugin-not-active' );
+		}
+
+		$actor_url = sanitize_url( wp_unslash( $_POST['actor_url'] ) );
+		if ( ! Friends::check_url( $actor_url ) ) {
+			wp_send_json_error( 'invalid-actor-url' );
+		}
+
+		$user_id = self::get_activitypub_actor_id( get_current_user_id() );
+		if ( ! $user_id ) {
+			wp_send_json_error( 'missing-local-activitypub-actor' );
+		}
+
+		$follower = \Activitypub\Collection\Followers::get_by_uri( $user_id, $actor_url );
+		if ( ! is_wp_error( $follower ) ) {
+			wp_send_json_success(
+				array(
+					'follows' => true,
+					'label'   => __( 'Follows you', 'friends' ),
+					'title'   => __( 'This actor follows your ActivityPub account. Replies and direct messages should be deliverable.', 'friends' ),
+				)
+			);
+		}
+
+		wp_send_json_success(
+			array(
+				'follows' => false,
+				'label'   => __( 'Not following you', 'friends' ),
+				'title'   => __( 'This actor is not in your local ActivityPub followers list. They may not receive follower-only or direct replies from your site.', 'friends' ),
+			)
+		);
+	}
+
+	/**
 	 * AJAX handler for re-linking an ActivityPub actor to a feed.
 	 */
 	public function ajax_relink_actor() {
@@ -1903,7 +2037,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	 * ActivityPub plugin's Remote_Actors API for the new format, or from legacy inline data.
 	 *
 	 * @param array $attributed_to The attributedTo metadata array.
-	 * @return array Actor metadata with keys: url, name, icon, summary, preferredUsername, header.
+	 * @return array Actor metadata with keys: url, name, icon, summary, preferredUsername, header, emojis.
 	 */
 	public static function get_actor_metadata_from_attributed_to( $attributed_to ) {
 		static $cache = array();
@@ -1915,6 +2049,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			'header'            => '',
 			'summary'           => '',
 			'preferredUsername' => '',
+			'emojis'            => array(),
 		);
 
 		if ( ! is_array( $attributed_to ) ) {
@@ -1926,7 +2061,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		if ( isset( $attributed_to['ap_actor_id'] ) && $attributed_to['ap_actor_id'] ) {
 			$cache_key = 'ap_' . $attributed_to['ap_actor_id'];
 		} elseif ( isset( $attributed_to['id'] ) ) {
-			$cache_key = 'id_' . $attributed_to['id'];
+			$cache_key = 'id_' . md5( wp_json_encode( $attributed_to ) );
 		}
 		if ( $cache_key && isset( $cache[ $cache_key ] ) ) {
 			return $cache[ $cache_key ];
@@ -1937,6 +2072,8 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			$ap_actor_id = $attributed_to['ap_actor_id'];
 
 			if ( class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+				self::refresh_actor_if_stale( $ap_actor_id );
+
 				$actor = \Activitypub\Collection\Remote_Actors::get_actor( $ap_actor_id );
 
 				if ( $actor && ! is_wp_error( $actor ) ) {
@@ -1944,6 +2081,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 					$metadata['name'] = $actor->get_name() ?? '';
 					$metadata['summary'] = $actor->get_summary() ?? '';
 					$metadata['preferredUsername'] = $actor->get_preferred_username() ?? '';
+					$metadata['emojis'] = self::get_custom_emojis_from_actor_post( $ap_actor_id );
 					$icon = $actor->get_icon();
 					if ( $icon ) {
 						$metadata['icon'] = \Activitypub\object_to_uri( $icon );
@@ -1987,11 +2125,222 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		if ( isset( $attributed_to['preferredUsername'] ) ) {
 			$metadata['preferredUsername'] = $attributed_to['preferredUsername'];
 		}
+		if ( isset( $attributed_to['tag'] ) ) {
+			$metadata['emojis'] = self::get_custom_emojis_from_actor_tags( $attributed_to['tag'] );
+		}
 
 		if ( $cache_key ) {
 			$cache[ $cache_key ] = $metadata;
 		}
 		return $metadata;
+	}
+
+	/**
+	 * Refresh stale cached remote actor metadata.
+	 *
+	 * Boosted actors may not send Update activities to this site, so their
+	 * cached metadata can go stale even while the boosting feed remains fresh.
+	 *
+	 * @param int $ap_actor_id The ap_actor post ID.
+	 * @return int|\WP_Error|null Updated post ID, error, or null when no refresh was needed.
+	 */
+	public static function refresh_actor_if_stale( $ap_actor_id ) {
+		if ( ! class_exists( '\Activitypub\Collection\Remote_Actors' ) || ! class_exists( '\Activitypub\Http' ) ) {
+			return null;
+		}
+
+		$actor_post = get_post( $ap_actor_id );
+		if ( ! $actor_post || 'ap_actor' !== $actor_post->post_type ) {
+			return null;
+		}
+
+		$modified = strtotime( $actor_post->post_modified_gmt . ' GMT' );
+		if ( $modified && time() - $modified < WEEK_IN_SECONDS ) {
+			return null;
+		}
+
+		$last_attempt = (int) get_post_meta( $actor_post->ID, '_friends_actor_refresh_attempted', true );
+		if ( $last_attempt && time() - $last_attempt < DAY_IN_SECONDS ) {
+			return null;
+		}
+
+		$actor_url = self::get_actor_url_from_remote_actor_id( $actor_post->ID );
+		if ( ! $actor_url ) {
+			return null;
+		}
+
+		update_post_meta( $actor_post->ID, '_friends_actor_refresh_attempted', time() );
+
+		$actor = \Activitypub\Http::get_remote_object( $actor_url, false );
+		if ( is_wp_error( $actor ) ) {
+			return $actor;
+		}
+
+		$updated = \Activitypub\Collection\Remote_Actors::update( $actor_post, $actor );
+		if ( is_wp_error( $updated ) ) {
+			return $updated;
+		}
+
+		delete_post_meta( $actor_post->ID, '_friends_actor_refresh_attempted' );
+
+		return $updated;
+	}
+
+	/**
+	 * Get custom emoji metadata from a cached ActivityPub actor post.
+	 *
+	 * @param int $ap_actor_id The ap_actor post ID.
+	 * @return array Map of shortcode to image URL.
+	 */
+	public static function get_custom_emojis_from_actor_post( $ap_actor_id ) {
+		$actor_post = get_post( $ap_actor_id );
+		if ( ! $actor_post || 'ap_actor' !== $actor_post->post_type || empty( $actor_post->post_content ) ) {
+			return array();
+		}
+
+		$actor = json_decode( $actor_post->post_content, true );
+		if ( ! is_array( $actor ) || empty( $actor['tag'] ) ) {
+			return array();
+		}
+
+		return self::get_custom_emojis_from_actor_tags( $actor['tag'] );
+	}
+
+	/**
+	 * Get custom emoji metadata from ActivityPub actor tags.
+	 *
+	 * @param array $tags ActivityPub tag data.
+	 * @return array Map of shortcode to image URL.
+	 */
+	public static function get_custom_emojis_from_actor_tags( $tags ) {
+		$emojis = array();
+
+		if ( ! is_array( $tags ) ) {
+			return $emojis;
+		}
+
+		if ( isset( $tags['type'] ) ) {
+			$tags = array( $tags );
+		}
+
+		foreach ( $tags as $tag ) {
+			if ( ! is_array( $tag ) || ( $tag['type'] ?? null ) !== 'Emoji' || empty( $tag['name'] ) || empty( $tag['icon']['url'] ) ) {
+				continue;
+			}
+
+			$emojis[ $tag['name'] ] = $tag['icon']['url'];
+		}
+
+		return $emojis;
+	}
+
+	/**
+	 * Replaces ActivityPub custom emoji shortcodes with inline images.
+	 *
+	 * @param string $text The text that may contain custom emoji shortcodes.
+	 * @param array  $emojis Map of shortcode to image URL.
+	 * @return string HTML with custom emoji images.
+	 */
+	public static function replace_custom_emojis( $text, $emojis ) {
+		if ( empty( $text ) || empty( $emojis ) || ! is_array( $emojis ) ) {
+			return esc_html( $text );
+		}
+
+		$parts = preg_split( '/(:[a-zA-Z0-9_+-]+:)/', $text, -1, PREG_SPLIT_DELIM_CAPTURE );
+		if ( false === $parts ) {
+			return esc_html( $text );
+		}
+
+		$html = '';
+		foreach ( $parts as $part ) {
+			if ( isset( $emojis[ $part ] ) ) {
+				$html .= '<img class="activitypub-custom-emoji" src="' . esc_url( $emojis[ $part ] ) . '" alt="' . esc_attr( $part ) . '" title="' . esc_attr( trim( $part, ':' ) ) . '" loading="lazy" />';
+				continue;
+			}
+
+			$html .= esc_html( $part );
+		}
+
+		return $html;
+	}
+
+	/**
+	 * Get custom emoji metadata for a Friends user with an ActivityPub feed.
+	 *
+	 * @param User|null $friend_user The Friends user.
+	 * @return array Map of shortcode to image URL.
+	 */
+	public static function get_custom_emojis_for_user( ?User $friend_user = null ) {
+		if ( ! $friend_user ) {
+			return array();
+		}
+
+		foreach ( $friend_user->get_active_feeds() as $user_feed ) {
+			if ( self::SLUG !== $user_feed->get_parser() ) {
+				continue;
+			}
+
+			$ap_actor_id = $user_feed->get_ap_actor_id();
+			if ( ! $ap_actor_id ) {
+				continue;
+			}
+
+			self::refresh_actor_if_stale( $ap_actor_id );
+			return self::get_custom_emojis_from_actor_post( $ap_actor_id );
+		}
+
+		return array();
+	}
+
+	/**
+	 * Replaces custom emoji shortcodes in a Friends user's display name.
+	 *
+	 * @param string    $text        The display name.
+	 * @param User|null $friend_user The Friends user.
+	 * @return string HTML with custom emoji images.
+	 */
+	public static function replace_custom_emojis_for_user( $text, ?User $friend_user = null ) {
+		$emojis = self::get_custom_emojis_for_user( $friend_user );
+		$html   = self::replace_custom_emojis( $text, $emojis );
+
+		if ( empty( $emojis ) || ! $friend_user || esc_html( $text ) !== $html ) {
+			return $html;
+		}
+
+		foreach ( $friend_user->get_active_feeds() as $user_feed ) {
+			if ( self::SLUG !== $user_feed->get_parser() ) {
+				continue;
+			}
+
+			$ap_actor_id = $user_feed->get_ap_actor_id();
+			if ( ! $ap_actor_id ) {
+				continue;
+			}
+
+			$actor_title = get_post_field( 'post_title', $ap_actor_id );
+			if ( $actor_title && $actor_title !== $text ) {
+				return self::replace_custom_emojis( $actor_title, $emojis );
+			}
+		}
+
+		return $html;
+	}
+
+	/**
+	 * Get the HTML allowed for rendered ActivityPub custom emoji.
+	 *
+	 * @return array Allowed HTML.
+	 */
+	public static function get_custom_emoji_allowed_html() {
+		return array(
+			'img' => array(
+				'alt'     => true,
+				'class'   => true,
+				'loading' => true,
+				'src'     => true,
+				'title'   => true,
+			),
+		);
 	}
 
 	/**
@@ -2568,6 +2917,11 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				'data' => $data,
 			)
 		);
+
+		if ( defined( 'ACTIVITYPUB_OBJECT_STATE_FEDERATED' ) ) {
+			$data['meta']['activitypub_status'] = ACTIVITYPUB_OBJECT_STATE_FEDERATED;
+		}
+
 		return new Feed_Item( $data );
 	}
 
@@ -3384,6 +3738,36 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			return true;
 		}
 		return $disabled;
+	}
+
+	/**
+	 * Allow local comments on cached ActivityPub posts to federate.
+	 *
+	 * Cached ActivityPub posts are remote public objects stored locally. They
+	 * should remain disabled for the ActivityPub post pipeline, but replies to
+	 * them need to pass ActivityPub's public-queryability gate so comments can
+	 * be sent as replies to the remote object.
+	 *
+	 * @param bool     $queryable Whether the post is publicly queryable.
+	 * @param \WP_Post $post      The post being evaluated.
+	 *
+	 * @return bool
+	 */
+	public function activitypub_cached_post_publicly_queryable( $queryable, $post ) {
+		if (
+			! $post instanceof \WP_Post ||
+			Friends::CPT !== $post->post_type ||
+			'publish' !== $post->post_status
+		) {
+			return $queryable;
+		}
+
+		if ( self::SLUG === User_Feed::get_parser_for_post_id( $post->ID ) ) {
+			return true;
+		}
+
+		$activitypub = get_post_meta( $post->ID, self::SLUG, true );
+		return is_array( $activitypub ) && ! empty( $activitypub['attributedTo'] ) ? true : $queryable;
 	}
 
 	public function the_content( $the_content ) {
@@ -4380,6 +4764,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				'name'    => $actor_metadata['name'],
 				'handle'  => self::convert_actor_to_mastodon_handle( $actor_metadata['url'] ),
 				'summary' => wp_strip_all_tags( $actor_metadata['summary'] ),
+				'emojis'  => $actor_metadata['emojis'],
 			)
 		);
 	}

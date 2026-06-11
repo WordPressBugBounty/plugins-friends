@@ -270,16 +270,35 @@ class Messages {
 			)
 		);
 
+		$title = esc_html__( 'Direct Messages', 'friends' );
+		if ( $unread_messages->post_count > 0 ) {
+			$title .= ' <span class="wp-core-ui wp-ui-notification friends-open-requests">' . esc_html( number_format_i18n( $unread_messages->post_count ) ) . '</span>';
+		}
+
+		$wp_menu->add_menu(
+			array(
+				'id'     => 'friends-direct-messages',
+				'parent' => 'friends-menu',
+				'title'  => $title,
+				'href'   => home_url( '/friends/messages/' ),
+			)
+		);
+
 		while ( $unread_messages->have_posts() ) {
 			$unread_messages->the_post();
-			$friend_user = User::get_post_author( $post );
+			$friend_user   = User::get_post_author( $post );
+			$conversation  = $post;
+			while ( $conversation->post_parent ) {
+				$conversation = get_post( $conversation->post_parent );
+			}
+			$conversation_url = add_query_arg( 'conversation', $conversation->ID, home_url( '/friends/messages/' ) );
 			$wp_menu->add_menu(
 				array(
 					'id'     => 'friend-message-' . $friend_user->ID,
 					'parent' => 'friends-menu',
 					// translators: %s is the number of open friend requests.
 					'title'  => '<span style="border-left: 2px solid #d63638; padding-left: .5em">' . esc_html( sprintf( __( 'New message from %s', 'friends' ), $friend_user->display_name ) ) . '</span>',
-					'href'   => $friend_user->get_local_friends_page_url(),
+					'href'   => $conversation_url,
 				)
 			);
 		}
@@ -543,7 +562,13 @@ class Messages {
 			wp_die( esc_html( $error->get_error_message() ) );
 		}
 
-		wp_safe_redirect( $friend_user->get_local_friends_page_url() );
+		if ( isset( $_REQUEST['friends_message_redirect_to'] ) ) {
+			$redirect_to = wp_validate_redirect( sanitize_url( wp_unslash( $_REQUEST['friends_message_redirect_to'] ) ), $friend_user->get_local_friends_page_url() );
+		} else {
+			$redirect_to = $friend_user->get_local_friends_page_url();
+		}
+
+		wp_safe_redirect( $redirect_to );
 		exit;
 	}
 
@@ -574,7 +599,13 @@ class Messages {
 			wp_die( esc_html( $error->get_error_message() ) );
 		}
 
-		wp_safe_redirect( $friend_user->get_local_friends_page_url() );
+		if ( isset( $_REQUEST['friends_message_redirect_to'] ) ) {
+			$redirect_to = wp_validate_redirect( sanitize_url( wp_unslash( $_REQUEST['friends_message_redirect_to'] ) ), $friend_user->get_local_friends_page_url() );
+		} else {
+			$redirect_to = $friend_user->get_local_friends_page_url();
+		}
+
+		wp_safe_redirect( $redirect_to );
 		exit;
 	}
 

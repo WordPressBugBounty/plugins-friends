@@ -10,12 +10,13 @@ $_feeds = count( $args['friend_user']->get_feeds() );
 $rules = count( $args['friend_user']->get_feed_rules() );
 $active_feeds = count( $args['friend_user']->get_active_feeds() );
 $hidden_post_count = $args['friend_user']->get_post_in_trash_count();
+$display_name_html = Friends\Feed_Parser_ActivityPub::replace_custom_emojis_for_user( $args['friend_user']->display_name, $args['friend_user'] );
 
 // Get ActivityPub feeds and their data (header image, profile URLs, summary).
 $activitypub_feeds = array();
 $header_image_url = null;
 $activitypub_summary = null;
-foreach ( $args['friend_user']->get_active_feeds() as $feed ) {
+foreach ( $args['friend_user']->get_feeds() as $feed ) {
 	// Check if this is an ActivityPub feed (parser is 'activitypub').
 	if ( 'activitypub' !== $feed->get_parser() ) {
 		continue;
@@ -112,7 +113,7 @@ if ( $args['friends']->frontend->reaction ) {
 		<img src="<?php echo esc_attr( $args['friend_user']->get_avatar_url() ); ?>" alt="<?php echo esc_attr( $args['friend_user']->display_name ); ?>" class="avatar" width="36" height="36" style="vertical-align: middle;" />
 		<?php
 	}
-	echo esc_html( $args['friend_user']->display_name );
+	echo wp_kses( $display_name_html, Friends\Feed_Parser_ActivityPub::get_custom_emoji_allowed_html() );
 }
 ?>
 </a>
@@ -181,6 +182,12 @@ foreach ( $activitypub_feeds as $ap_feed ) :
 		<a class="chip activitypub-profile" href="<?php echo esc_url( $ap_feed['url'] ); ?>" target="_blank" rel="noopener" title="<?php esc_attr_e( 'ActivityPub Profile', 'friends' ); ?>">
 			<span class="dashicons dashicons-rss" style="font-size: 14px; width: 14px; height: 14px; margin-right: 4px; vertical-align: text-bottom;"></span><?php echo esc_html( $ap_display ); ?>
 		</a>
+		<span class="chip activitypub-follower-check is-loading"
+			data-actor-url="<?php echo esc_attr( $ap_feed['url'] ); ?>"
+			data-nonce="<?php echo esc_attr( wp_create_nonce( 'friends-check-follower' ) ); ?>"
+			title="<?php esc_attr_e( 'Checking whether this actor follows you.', 'friends' ); ?>">
+			<?php esc_html_e( 'Checking follower...', 'friends' ); ?>
+		</span>
 		<?php
 	endif;
 endforeach;

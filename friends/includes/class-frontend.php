@@ -419,9 +419,13 @@ class Frontend {
 		if ( is_user_logged_in() && Friends::on_frontend() && 'block' !== $this->theme ) {
 			// Dequeue theme styles so that they don't interact with the Friends frontend.
 			$wp_styles = wp_styles();
+			$theme_root_path = wp_parse_url( get_theme_root_uri(), PHP_URL_PATH );
 			foreach ( $wp_styles->queue as $style ) {
 				$src = $wp_styles->registered[ $style ]->src;
-				if ( 'global-styles' === $style || false !== strpos( $src, '/themes/' ) ) {
+				$src_path = wp_parse_url( $src, PHP_URL_PATH );
+				$is_theme_style = $theme_root_path && $src_path
+					&& 0 === strpos( $src_path, trailingslashit( $theme_root_path ) );
+				if ( 'global-styles' === $style || $is_theme_style ) {
 					wp_dequeue_style( $style );
 				}
 			}
@@ -868,18 +872,19 @@ class Frontend {
 				} else {
 					return '';
 				}
-				if ( empty( $author ) ) {
+				if ( empty( $author ) || is_wp_error( $author ) ) {
 					return '';
 				}
 
-				$author_name = $author->display_name;
+				$author_name      = $author->display_name;
+				$author_name_html = Feed_Parser_ActivityPub::replace_custom_emojis_for_user( $author_name, $author );
 				$override_author_name = apply_filters( 'friends_override_author_name', '', $author_name, $block->context['postId'] );
 				if ( isset( $attributes['isLink'] ) && $attributes['isLink'] ) {
-					$author_name = sprintf( '<a href="%1$s" target="%2$s" class="wp-block-post-author-name__link">%3$s</a>', $author->get_local_friends_page_url(), esc_attr( $attributes['linkTarget'] ), $author_name );
+					$author_name_html = sprintf( '<a href="%1$s" target="%2$s" class="wp-block-post-author-name__link">%3$s</a>', esc_url( $author->get_local_friends_page_url() ), esc_attr( $attributes['linkTarget'] ), $author_name_html );
 				}
 
 				if ( $override_author_name && trim( str_replace( $override_author_name, '', $author_name ) ) === $author_name ) {
-					$author_name .= ' – ' . esc_html( $override_author_name );
+					$author_name_html .= ' – ' . esc_html( $override_author_name );
 				}
 
 				$classes = array();
@@ -891,7 +896,23 @@ class Frontend {
 				}
 				$wrapper_attributes = get_block_wrapper_attributes( array( 'class' => implode( ' ', $classes ) ) );
 
-				return sprintf( '<div %1$s>%2$s</div>', $wrapper_attributes, $author_name );
+				return sprintf(
+					'<div %1$s>%2$s</div>',
+					$wrapper_attributes,
+					wp_kses(
+						$author_name_html,
+						array_merge(
+							Feed_Parser_ActivityPub::get_custom_emoji_allowed_html(),
+							array(
+								'a' => array(
+									'class'  => true,
+									'href'   => true,
+									'target' => true,
+								),
+							)
+						)
+					)
+				);
 			};
 		}
 		return $settings;
@@ -1673,6 +1694,14 @@ class Frontend {
 			case 'following':
 				$friends_args = array();
 				$path         = 'frontend/subscriptions';
+				break;
+
+			case 'messages':
+				$friends_args = array(
+					'title'            => __( 'Direct Messages', 'friends' ),
+					'no-bottom-margin' => true,
+				);
+				$path         = 'frontend/messages';
 				break;
 
 			case 'followers':

@@ -89,6 +89,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		\add_action( 'friends_get_reaction_display_name', array( $this, 'get_reaction_display_name' ), 10, 2 );
 
 		\add_filter( 'pre_comment_approved', array( $this, 'pre_comment_approved' ), 10, 2 );
+		\add_action( 'wp_insert_comment', array( $this, 'prepare_cached_post_for_comment_federation' ), 5, 2 );
 		\add_action( 'comment_post', array( $this, 'comment_post' ), 10, 3 );
 		\add_action( 'trashed_comment', array( $this, 'trashed_comment' ), 10, 2 );
 		\add_filter( 'friends_get_comments', array( $this, 'get_remote_comments' ), 10, 4 );
@@ -300,7 +301,10 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		if ( $is_external_user ) {
 			$feed_url = get_post_meta( $post_id, 'feed_url', true );
 			if ( $feed_url ) {
-				$actor = self::convert_actor_to_mastodon_handle( $feed_url );
+				$actor = self::get_actor_acct_from_attributed_to( $meta['attributedTo'] );
+				if ( ! $actor ) {
+					$actor = self::convert_actor_to_mastodon_handle( $feed_url );
+				}
 				$account = new Entity_Account();
 				$account->id             = $feed_url;
 				$account->username       = strtok( $actor, '@' );
@@ -338,9 +342,9 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			if ( ! empty( $actor_metadata['preferredUsername'] ) ) {
 				$status->reblog->account->id = $attributed_to_url;
 				$status->reblog->account->username = $actor_metadata['preferredUsername'];
-				$acct = self::convert_actor_to_mastodon_handle( $attributed_to_url );
-				if ( $acct === $attributed_to_url && ! empty( $meta['attributedTo']['ap_actor_id'] ) && class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
-					$acct = \Activitypub\Collection\Remote_Actors::get_acct( $meta['attributedTo']['ap_actor_id'] );
+				$acct = self::get_actor_acct_from_attributed_to( $meta['attributedTo'] );
+				if ( ! $acct ) {
+					$acct = self::convert_actor_to_mastodon_handle( $attributed_to_url );
 				}
 				$status->reblog->account->acct = $acct;
 				if ( ! empty( $actor_metadata['name'] ) ) {
@@ -512,6 +516,10 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 						<em style="color: green;"><?php \esc_html_e( 'accepted', 'friends' ); ?></em>
 					<?php elseif ( 'pending' === $follow_status ) : ?>
 						<em style="color: orange;"><?php \esc_html_e( 'pending', 'friends' ); ?></em>
+						<button type="button" class="button button-small refollow-btn"
+							data-nonce="<?php echo \esc_attr( \wp_create_nonce( 'friends-refollow-activitypub' ) ); ?>">
+							<?php \esc_html_e( 'Re-follow', 'friends' ); ?>
+						</button>
 					<?php elseif ( false === $follow_status ) : ?>
 						<em style="color: orange;"><?php \esc_html_e( 'not managed by ActivityPub plugin', 'friends' ); ?></em>
 						<button type="button" class="button button-small refollow-btn"
@@ -692,7 +700,8 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			if ( $user ) {
 				foreach ( $user->get_active_feeds() as $user_feed ) {
 					if ( 'activitypub' === $user_feed->get_parser() ) {
-						$this->mapped_usernames[ $user_id ] = self::convert_actor_to_mastodon_handle( $user_feed->get_url() );
+						$acct = self::get_actor_acct_from_user_feed( $user_feed );
+						$this->mapped_usernames[ $user_id ] = $acct ? $acct : self::convert_actor_to_mastodon_handle( $user_feed->get_url() );
 						break;
 					}
 				}
@@ -732,7 +741,8 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		if ( ! isset( $user_id_map[ $user_id ] ) && is_string( $user_id ) ) {
 			$user_feed = User_Feed::get_by_url( $user_id );
 			if ( $user_feed && ! is_wp_error( $user_feed ) ) {
-				$user_id_map[ $user_id ] = self::convert_actor_to_mastodon_handle( $user_feed->get_url() );
+				$acct = self::get_actor_acct_from_user_feed( $user_feed );
+				$user_id_map[ $user_id ] = $acct ? $acct : self::convert_actor_to_mastodon_handle( $user_feed->get_url() );
 			}
 		}
 		if ( ! isset( $user_id_map[ $user_id ] ) ) {
@@ -747,7 +757,8 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			if ( $user ) {
 				foreach ( $user->get_active_feeds() as $user_feed ) {
 					if ( 'activitypub' === $user_feed->get_parser() ) {
-						$user_id_map[ $user_id ] = self::convert_actor_to_mastodon_handle( $user_feed->get_url() );
+						$acct = self::get_actor_acct_from_user_feed( $user_feed );
+						$user_id_map[ $user_id ] = $acct ? $acct : self::convert_actor_to_mastodon_handle( $user_feed->get_url() );
 						break;
 					}
 				}
@@ -829,11 +840,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 		$actor_metadata = self::get_actor_metadata_from_attributed_to( $meta['attributedTo'] );
 
-		// Use cached acct from AP plugin when available (avoids slow guid query).
-		$actor = null;
-		if ( ! empty( $meta['attributedTo']['ap_actor_id'] ) && class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
-			$actor = \Activitypub\Collection\Remote_Actors::get_acct( $meta['attributedTo']['ap_actor_id'] );
-		}
+		$actor = self::get_actor_acct_from_attributed_to( $meta['attributedTo'] );
 		if ( ! $actor ) {
 			$actor = self::convert_actor_to_mastodon_handle( $attributed_to );
 		}
@@ -869,8 +876,12 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	public function friends_message_form_accounts( $accounts, User $friend_user ) {
 		foreach ( $friend_user->get_feeds() as $user_feed ) {
 			if ( 'activitypub' === $user_feed->get_parser() ) {
+				$acct = self::get_actor_acct_from_user_feed( $user_feed );
+				if ( ! $acct ) {
+					$acct = $this->convert_actor_to_mastodon_handle( $user_feed->get_url() );
+				}
 				// translators: %s is the user's handle.
-				$accounts[ $user_feed->get_url() ] = sprintf( __( '%s (via ActivityPub)', 'friends' ), '@' . $this->convert_actor_to_mastodon_handle( $user_feed->get_url() ) );
+				$accounts[ $user_feed->get_url() ] = sprintf( __( '%s (via ActivityPub)', 'friends' ), '@' . $acct );
 			}
 		}
 
@@ -1392,14 +1403,12 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 					$result['can_relink']     = true;
 					$result['found_actor_id'] = $actor_post->ID;
 				} else {
-					$result['status']        = 'warning';
-					$result['messages'][]    = __( 'No linked ActivityPub actor found for this feed. You can send a new follow request.', 'friends' );
-					$result['can_refollow']  = true;
+					$result['status']     = 'warning';
+					$result['messages'][] = __( 'No linked ActivityPub actor found for this feed.', 'friends' );
 				}
 			} else {
-				$result['status']       = 'warning';
-				$result['messages'][]   = __( 'No linked ActivityPub actor found for this feed. The ActivityPub plugin may not be managing this subscription.', 'friends' );
-				$result['can_refollow'] = true;
+				$result['status']     = 'warning';
+				$result['messages'][] = __( 'No linked ActivityPub actor found for this feed. The ActivityPub plugin may not be managing this subscription.', 'friends' );
 			}
 		}
 
@@ -1411,13 +1420,15 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				$result['follow_status'] = $follow_status;
 
 				if ( false === $follow_status ) {
-					$result['status']     = 'warning';
-					$result['messages'][] = __( 'The ActivityPub plugin is not managing this subscription. You may need to re-follow this actor.', 'friends' );
+					$result['status']        = 'warning';
+					$result['messages'][]    = __( 'The ActivityPub plugin is not managing this subscription. You may need to re-follow this actor.', 'friends' );
+					$result['can_refollow'] = true;
 				}
 
 				if ( 'pending' === $follow_status ) {
-					$result['status']     = 'warning';
-					$result['messages'][] = __( 'Your follow request is still pending. The remote server has not yet accepted it.', 'friends' );
+					$result['status']        = 'warning';
+					$result['messages'][]    = __( 'Your follow request is still pending. The remote server has not yet accepted it.', 'friends' );
+					$result['can_refollow'] = true;
 				}
 
 				if ( 'accepted' === $follow_status ) {
@@ -1483,16 +1494,14 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				// Get the latest local post for this user.
 				$friend_user = $user_feed->get_friend_user();
 				if ( $friend_user ) {
-					$latest_local_post = new \WP_Query(
-						array(
-							'post_type'      => Friends::CPT,
-							'post_status'    => array( 'publish', 'private' ),
-							'posts_per_page' => 1,
-							'orderby'        => 'date',
-							'order'          => 'DESC',
-							'author'         => $friend_user->ID,
-						)
-					);
+					$latest_local_post = new \WP_Query();
+					$latest_local_post->set( 'post_type', Friends::CPT );
+					$latest_local_post->set( 'post_status', array( 'publish', 'private' ) );
+					$latest_local_post->set( 'posts_per_page', 1 );
+					$latest_local_post->set( 'orderby', 'date' );
+					$latest_local_post->set( 'order', 'DESC' );
+					$latest_local_post = $friend_user->modify_query_by_author( $latest_local_post );
+					$latest_local_post->get_posts();
 
 					if ( $latest_local_post->have_posts() ) {
 						$result['latest_local'] = $latest_local_post->posts[0]->post_date_gmt;
@@ -1666,13 +1675,26 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 
 		$queued = $this->queue_follow_user( $feed );
+		if ( is_wp_error( $queued ) ) {
+			wp_send_json_error( $queued->get_error_message() );
+		}
+
 		if ( ! $queued ) {
 			wp_send_json_error( __( 'Could not queue the follow request. Make sure the ActivityPub plugin is active.', 'friends' ) );
+		}
+
+		$rescheduled = false;
+		if ( is_numeric( $queued ) && class_exists( '\Activitypub\Collection\Outbox' ) ) {
+			$rescheduled = \Activitypub\Collection\Outbox::reschedule( (int) $queued );
 		}
 
 		$message = $actor_post
 			? __( 'Follow request queued and actor data fetched. The feed will start updating once the remote server accepts it.', 'friends' )
 			: __( 'Follow request queued. The feed will start updating once the remote server accepts it.', 'friends' );
+
+		if ( $rescheduled ) {
+			$message = __( 'Follow request resent. The feed will start updating once the remote server accepts it.', 'friends' );
+		}
 
 		wp_send_json_success( array( 'message' => $message ) );
 	}
@@ -1711,7 +1733,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		if ( $ap_actor_id ) {
 			if ( class_exists( '\Activitypub\Collection\Following' ) ) {
 				$follow_status = \Activitypub\Collection\Following::check_status( self::get_activitypub_actor_id( null ), $ap_actor_id );
-				if ( false === $follow_status ) {
+				if ( false === $follow_status || 'pending' === $follow_status ) {
 					$can_refollow = true;
 				}
 			} else {
@@ -1722,8 +1744,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			if ( $actor_post && ! is_wp_error( $actor_post ) && 'ap_actor' === get_post_type( $actor_post ) ) {
 				$can_relink = true;
 			} else {
-				$actor_post   = null;
-				$can_refollow = true;
+				$actor_post = null;
 			}
 		} else {
 			$footer_note = __( 'The ActivityPub plugin is not active. ActivityPub subscriptions require it to receive new posts.', 'friends' );
@@ -1743,6 +1764,12 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 							<em style="color: orange;"><?php esc_html_e( 'not managed by ActivityPub plugin', 'friends' ); ?></em>
 						<?php else : ?>
 							<em><?php esc_html_e( 'unknown', 'friends' ); ?></em>
+						<?php endif; ?>
+						<?php if ( $can_refollow ) : ?>
+							<button type="button" class="button button-small refollow-btn"
+								data-nonce="<?php echo esc_attr( wp_create_nonce( 'friends-refollow-activitypub' ) ); ?>">
+								<?php esc_html_e( 'Re-follow', 'friends' ); ?>
+							</button>
 						<?php endif; ?>
 					</span>
 				<?php else : ?>
@@ -1780,12 +1807,6 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 						<span class="ap-data-label"><?php esc_html_e( 'Actor Post', 'friends' ); ?></span>
 						<span class="ap-data-value">
 							<em style="color: orange;"><?php esc_html_e( 'not found', 'friends' ); ?></em>
-							<?php if ( $can_refollow ) : ?>
-								<button type="button" class="button button-small refollow-btn"
-									data-nonce="<?php echo esc_attr( wp_create_nonce( 'friends-refollow-activitypub' ) ); ?>">
-									<?php esc_html_e( 'Re-follow', 'friends' ); ?>
-								</button>
-							<?php endif; ?>
 						</span>
 					<?php endif; ?>
 				<?php endif; ?>
@@ -2031,6 +2052,54 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 	}
 
 	/**
+	 * Get the actor acct from attributedTo metadata.
+	 *
+	 * @param array $attributed_to The attributedTo metadata array.
+	 * @return string The actor acct, or an empty string if unavailable.
+	 */
+	public static function get_actor_acct_from_attributed_to( $attributed_to ) {
+		if ( ! is_array( $attributed_to ) ) {
+			return '';
+		}
+
+		if ( ! empty( $attributed_to['acct'] ) ) {
+			return ltrim( $attributed_to['acct'], '@' );
+		}
+
+		if ( ! empty( $attributed_to['ap_actor_id'] ) ) {
+			return self::get_actor_acct_from_remote_actor_id( $attributed_to['ap_actor_id'] );
+		}
+
+		return '';
+	}
+
+	/**
+	 * Get the actor acct from an ActivityPub remote actor post ID.
+	 *
+	 * @param int $ap_actor_id The ActivityPub remote actor post ID.
+	 * @return string The actor acct, or an empty string if unavailable.
+	 */
+	private static function get_actor_acct_from_remote_actor_id( $ap_actor_id ) {
+		$ap_actor_id = (int) $ap_actor_id;
+		if ( ! $ap_actor_id || ! class_exists( '\Activitypub\Collection\Remote_Actors' ) ) {
+			return '';
+		}
+
+		return ltrim( \Activitypub\Collection\Remote_Actors::get_acct( $ap_actor_id ), '@' );
+	}
+
+	/**
+	 * Get the actor acct for an ActivityPub user feed.
+	 *
+	 * @param User_Feed $user_feed The user feed.
+	 * @return string The actor acct, or an empty string if unavailable.
+	 */
+	private static function get_actor_acct_from_user_feed( User_Feed $user_feed ) {
+		$ap_actor_id = $user_feed->get_ap_actor_id();
+		return self::get_actor_acct_from_remote_actor_id( $ap_actor_id );
+	}
+
+	/**
 	 * Get actor metadata from attributedTo.
 	 *
 	 * Returns actor metadata (name, icon, summary, preferredUsername, header) using the
@@ -2045,6 +2114,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		$metadata = array(
 			'url'               => null,
 			'name'              => '',
+			'acct'              => '',
 			'icon'              => '',
 			'header'            => '',
 			'summary'           => '',
@@ -2078,6 +2148,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 
 				if ( $actor && ! is_wp_error( $actor ) ) {
 					$metadata['url'] = $actor->get_id();
+					$metadata['acct'] = self::get_actor_acct_from_attributed_to( $attributed_to );
 					$metadata['name'] = $actor->get_name() ?? '';
 					$metadata['summary'] = $actor->get_summary() ?? '';
 					$metadata['preferredUsername'] = $actor->get_preferred_username() ?? '';
@@ -2113,6 +2184,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		if ( isset( $attributed_to['name'] ) ) {
 			$metadata['name'] = $attributed_to['name'];
 		}
+		$metadata['acct'] = self::get_actor_acct_from_attributed_to( $attributed_to );
 		if ( isset( $attributed_to['icon'] ) ) {
 			$metadata['icon'] = $attributed_to['icon'];
 		}
@@ -2763,11 +2835,31 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 					$actor_post = \Activitypub\Collection\Remote_Actors::fetch_by_uri( $actor_url );
 					if ( ! is_wp_error( $actor_post ) && $actor_post instanceof \WP_Post ) {
 						$data[ self::SLUG ]['attributedTo'] = array( 'ap_actor_id' => $actor_post->ID );
+						$acct = \Activitypub\Collection\Remote_Actors::get_acct( $actor_post->ID );
+						if ( $acct ) {
+							$data[ self::SLUG ]['attributedTo']['acct'] = ltrim( $acct, '@' );
+						}
 					} else {
 						$data[ self::SLUG ]['attributedTo'] = array( 'id' => $actor_url );
 					}
 				} else {
 					$data[ self::SLUG ]['attributedTo'] = array( 'id' => $actor_url );
+				}
+				if ( empty( $data[ self::SLUG ]['attributedTo']['acct'] ) ) {
+					$acct = self::get_actor_acct_from_attributed_to(
+						array_merge(
+							$data[ self::SLUG ]['attributedTo'],
+							array_intersect_key(
+								$meta,
+								array(
+									'acct' => true,
+								)
+							)
+						)
+					);
+					if ( $acct ) {
+						$data[ self::SLUG ]['attributedTo']['acct'] = $acct;
+					}
 				}
 			}
 		}
@@ -3770,6 +3862,41 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		return is_array( $activitypub ) && ! empty( $activitypub['attributedTo'] ) ? true : $queryable;
 	}
 
+	/**
+	 * Mark cached ActivityPub posts as federated before comment scheduling.
+	 *
+	 * ActivityPub only federates a new local comment when its parent post is
+	 * considered federated. Cached Friends posts are remote objects, so they do
+	 * not go through the normal local post outbox lifecycle, but local replies
+	 * still need this state so ActivityPub can queue the comment as a reply to
+	 * the remote object.
+	 *
+	 * @param int         $comment_id The comment ID.
+	 * @param \WP_Comment $comment    The comment object.
+	 */
+	public function prepare_cached_post_for_comment_federation( $comment_id, $comment ) {
+		if ( ! defined( 'ACTIVITYPUB_OBJECT_STATE_FEDERATED' ) ) {
+			return;
+		}
+
+		$comment = get_comment( $comment );
+		if ( ! $comment || ! $comment->user_id || 1 !== (int) $comment->comment_approved ) {
+			return;
+		}
+
+		$post = get_post( $comment->comment_post_ID );
+		if (
+			! $post instanceof \WP_Post ||
+			Friends::CPT !== $post->post_type ||
+			'publish' !== $post->post_status ||
+			! self::post_supports_activitypub( $post->ID )
+		) {
+			return;
+		}
+
+		update_post_meta( $post->ID, 'activitypub_status', ACTIVITYPUB_OBJECT_STATE_FEDERATED );
+	}
+
 	public function the_content( $the_content ) {
 		if ( ! Friends::on_frontend() || ! class_exists( '\WP_HTML_Tag_Processor' ) ) {
 			return $the_content;
@@ -4367,23 +4494,42 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 		}
 
 		if ( get_post_meta( $post->ID, 'boosted', true ) ) {
-			\delete_post_meta( $post->ID, 'boosted' );
 			$this->mastodon_api_unreblog( $post->ID );
 			wp_send_json_success( 'unboosted', array( 'id' => $post->ID ) );
 			return;
 		}
-		\update_post_meta( $post->ID, 'boosted', get_current_user_id() );
 		$this->mastodon_api_reblog( $post->ID );
 
 		wp_send_json_success( 'boosted', array( 'id' => $post->ID ) );
 	}
 
 	public function mastodon_api_reblog( $post_id ) {
-		$this->queue_announce( get_post( $post_id ) );
+		$post = get_post( $post_id );
+		if ( ! $post ) {
+			return;
+		}
+
+		$user_id = get_current_user_id();
+		if ( ! $user_id ) {
+			return;
+		}
+
+		update_post_meta( $post->ID, 'boosted', $user_id );
+		update_post_meta( $post->ID, 'boosted_at', current_time( 'mysql', true ) );
+
+		$this->queue_announce( $post );
 	}
 
 	public function mastodon_api_unreblog( $post_id ) {
-		$this->queue_unannounce( get_post( $post_id ) );
+		$post = get_post( $post_id );
+		if ( ! $post ) {
+			return;
+		}
+
+		delete_post_meta( $post->ID, 'boosted' );
+		delete_post_meta( $post->ID, 'boosted_at' );
+
+		$this->queue_unannounce( $post );
 	}
 
 	/**
@@ -4762,7 +4908,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 			array(
 				'url'     => $actor_metadata['url'],
 				'name'    => $actor_metadata['name'],
-				'handle'  => self::convert_actor_to_mastodon_handle( $actor_metadata['url'] ),
+				'handle'  => $actor_metadata['acct'] ? $actor_metadata['acct'] : self::convert_actor_to_mastodon_handle( $actor_metadata['url'] ),
 				'summary' => wp_strip_all_tags( $actor_metadata['summary'] ),
 				'emojis'  => $actor_metadata['emojis'],
 			)
@@ -4962,7 +5108,7 @@ class Feed_Parser_ActivityPub extends Feed_Parser_V2 {
 				)
 			);
 			foreach ( $term_query->get_terms() as $term ) {
-				$feed_host = wp_parse_url( $term->slug, PHP_URL_HOST );
+				$feed_host = wp_parse_url( $term->name, PHP_URL_HOST );
 				if ( $feed_host ) {
 					$known_hosts[ $feed_host ] = true;
 				}
